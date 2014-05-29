@@ -101,6 +101,7 @@ typedef struct
     tbx_t *tbx_idx;
     hts_idx_t *bcf_idx;
     bcf_hdr_t *header;
+    bcf_hdr_t* processed_header;    //used in VCF merge in bcftools for processing each file before merge
     hts_itr_t *itr;
     const char *fname;
     bcf1_t **buffer;                // cached VCF records. First is the current record synced across the reader

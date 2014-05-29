@@ -29,7 +29,12 @@ RANLIB = ranlib
 # TODO: edit cram code to remove need for -DSAMTOOLS
 CPPFLAGS = -I. -DSAMTOOLS=1
 # TODO: probably update cram code to make it compile cleanly with -Wc++-compat
-CFLAGS   = -g -Wall -O2
+ifdef DEBUG
+  CFLAGS = -g -g3
+else
+  CFLAGS = -O3
+endif
+CFLAGS += -Wall
 EXTRA_CFLAGS_PIC = -fpic
 LDFLAGS  =
 LDLIBS   =

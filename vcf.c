@@ -2613,6 +2613,11 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
             }
             line->d.shared_dirty |= BCF1_DIRTY_INF;
             inf->vptr = NULL;
+	    int idx;
+	    //KG: shift elements of array d
+	    for(idx=i;idx<line->n_info-1;++idx)
+	      memcpy(&(line->d.info[idx]), &(line->d.info[idx+1]), sizeof(bcf_info_t));
+            --(line->n_info);       //KG: reduce n_info when tag is removed
         }
         return 0;
     }
@@ -2727,6 +2732,7 @@ int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const
             }
             line->d.indiv_dirty = 1;
             fmt->p = NULL;
+            --(line->n_fmt);
         }
         return 0;
     }
