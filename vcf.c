@@ -2732,6 +2732,10 @@ int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const
             }
             line->d.indiv_dirty = 1;
             fmt->p = NULL;
+            int idx;
+	    //KG: shift elements of array fmt
+	    for(idx=i;idx<line->n_fmt-1;++idx)
+	      memcpy(&(line->d.fmt[idx]), &(line->d.fmt[idx+1]), sizeof(bcf_fmt_t));
             --(line->n_fmt);
         }
         return 0;

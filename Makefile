@@ -34,6 +34,9 @@ ifdef DEBUG
 else
   CFLAGS = -O3
 endif
+ifdef PROFILE
+  CFLAGS += -pg
+endif
 CFLAGS += -Wall
 EXTRA_CFLAGS_PIC = -fpic
 LDFLAGS  =
