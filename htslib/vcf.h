@@ -225,6 +225,9 @@ typedef struct {
     int unpacked;           // remember what has been unpacked to allow calling bcf_unpack() repeatedly without redoing the work
     int unpack_size[3];     // the original block size of ID, REF+ALT and FILTER
     int errcode;    // one of BCF_ERR_* codes
+    //FIXME: Horrible hack, I'm so sorry
+    //Flag which is 0 mostly, but if this record was produced by splitting a gVCF interval, then it's set to 1
+    int is_split_record; 
 } bcf1_t;
 
 /*******

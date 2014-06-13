@@ -100,12 +100,15 @@ typedef struct
     htsFile *file;
     tbx_t *tbx_idx;
     hts_idx_t *bcf_idx;
+
     bcf_hdr_t *header;
     bcf_hdr_t* processed_header;    //used in VCF merge in bcftools for processing each file before merge
     hts_itr_t *itr;
     const char *fname;
     bcf1_t **buffer;                // cached VCF records. First is the current record synced across the reader
     int nbuffer, mbuffer;           // number of cached records (including the current record); number of allocated records
+    int last_valid_record_idx;       //index in buffer corresponding to BCF record with pos value != pos value of previous records in the buffer, normally equal to nbuffer, differs when gVCFs are being merged
+    int eof;                        //1: end of file, 0: still open
     int nfilter_ids, *filter_ids;   // -1 for ".", otherwise filter id as returned by bcf_id2int
     int type;
     int *samples, n_smpl;   // list of columns in the order consistent with bcf_srs_t.samples

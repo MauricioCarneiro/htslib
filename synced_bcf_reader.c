@@ -35,6 +35,13 @@ DEALINGS IN THE SOFTWARE.  */
 
 #define MAX_CSI_COOR 0x7fffffff     // maximum indexable coordinate of .csi
 
+#ifdef DEBUG
+#include <assert.h>
+#define ASSERT(x)  assert(x)
+#else
+#define ASSERT(x)  ;
+#endif
+
 typedef struct
 {
     uint32_t start, end;
@@ -251,7 +258,6 @@ void bcf_sr_remove_reader(bcf_srs_t *files, int i)
     files->nreaders--;
 }
 
-
 /*
    Removes duplicate records from the buffer. The meaning of "duplicate" is
    controlled by the $collapse variable, which can cause that from multiple
@@ -262,7 +268,7 @@ void bcf_sr_remove_reader(bcf_srs_t *files, int i)
 static void collapse_buffer(bcf_srs_t *files, bcf_sr_t *reader)
 {
     int irec,jrec, has_snp=0, has_indel=0, has_any=0;
-    for (irec=1; irec<=reader->nbuffer; irec++)
+    for (irec=1; irec<=reader->last_valid_record_idx; irec++)
     {
         bcf1_t *line = reader->buffer[irec];
         if ( line->pos != reader->buffer[1]->pos ) break;
@@ -283,25 +289,37 @@ static void collapse_buffer(bcf_srs_t *files, bcf_sr_t *reader)
             else line->pos = -1;
         }
     }
+#ifdef DEBUG
+    //TODO: assumption: either nbuffer represents the first entry corresponding to next pos in the file OR EOF records are being processed
+    ASSERT(irec == reader->nbuffer || reader->eof);
+    //TODO: no invalid records between [nbuffer:last_valid_record_idx] || EOF (implying this record had same pos value)
+    for (irec=1; irec<=reader->last_valid_record_idx; irec++)
+        if(reader->buffer[irec]->pos == -1)
+            ASSERT(irec < reader->nbuffer || reader->eof);
+#endif
     bcf1_t *tmp;
     irec = jrec = 1;
-    while ( irec<=reader->nbuffer && jrec<=reader->nbuffer )
+    while ( irec<=reader->last_valid_record_idx && jrec<=reader->last_valid_record_idx )
     {
         if ( reader->buffer[irec]->pos != -1 ) { irec++; continue; }
         if ( jrec<=irec ) jrec = irec+1;
-        while ( jrec<=reader->nbuffer && reader->buffer[jrec]->pos==-1 ) jrec++;
-        if ( jrec<=reader->nbuffer )
+        while ( jrec<=reader->last_valid_record_idx && reader->buffer[jrec]->pos==-1 )
+            jrec++;
+        if ( jrec<=reader->last_valid_record_idx )
         {
             tmp = reader->buffer[irec]; reader->buffer[irec] = reader->buffer[jrec]; reader->buffer[jrec] = tmp;
         }
     }
-    reader->nbuffer = irec - 1;
+    //make last_valid_record_idx point to irec-1, and compute nbuffer using this offset
+    int diff = reader->last_valid_record_idx - reader->nbuffer;
+    reader->last_valid_record_idx = irec - 1;
+    reader->nbuffer = reader->last_valid_record_idx - diff;
 }
 
 void debug_buffer(FILE *fp, bcf_sr_t *reader)
 {
     int j;
-    for (j=0; j<=reader->nbuffer; j++)
+    for (j=0; j<=reader->last_valid_record_idx; j++)
     {
         bcf1_t *line = reader->buffer[j];
         fprintf(fp,"%s%s\t%s:%d\t%s ", reader->fname,j==0?"*":"",reader->header->id[BCF_DT_CTG][line->rid].key,line->pos+1,line->n_allele?line->d.allele[0]:"");
@@ -352,6 +370,7 @@ static int _reader_seek(bcf_sr_t *reader, const char *seq, int start, int end)
         reader->itr = NULL;
     }
     reader->nbuffer = 0;
+    reader->last_valid_record_idx = 0;
     if ( reader->tbx_idx )
     {
         int tid = tbx_name2id(reader->tbx_idx, seq);
@@ -377,7 +396,7 @@ static int _readers_next_region(bcf_srs_t *files)
     // Need to open new chromosome? Check number of lines in all readers' buffers
     int i, eos = 0;
     for (i=0; i<files->nreaders; i++)
-        if ( !files->readers[i].itr && !files->readers[i].nbuffer ) eos++;
+        if ( !files->readers[i].itr && !files->readers[i].last_valid_record_idx ) eos++;
 
     if ( eos!=files->nreaders )
     {
@@ -397,10 +416,16 @@ static int _readers_next_region(bcf_srs_t *files)
 /*
  *  _reader_fill_buffer() - buffers all records with the same coordinate
  */
+//Read VCF/BCF records into buffer till a record with a different location is found
+//The record with a different location, if read, will be at the last location
+//Entry 0 is not used - will be used in bcf_sr_next_line to store entries which
+//are common across samples
+//last_valid_record_idx does not account for the 0 element buffer
+//mbuffer is total size of allocated buffer
 static void _reader_fill_buffer(bcf_srs_t *files, bcf_sr_t *reader)
 {
     // Return if the buffer is full: the coordinate of the last buffered record differs
-    if ( reader->nbuffer && reader->buffer[reader->nbuffer]->pos != reader->buffer[1]->pos ) return;
+    if ( reader->last_valid_record_idx && reader->buffer[reader->last_valid_record_idx]->pos != reader->buffer[1]->pos ) return;
 
     // No iterator (sequence not present in this file) and not streaming
     if ( !reader->itr && !files->streaming ) return;
@@ -409,7 +434,7 @@ static void _reader_fill_buffer(bcf_srs_t *files, bcf_sr_t *reader)
     int i, ret = 0;
     while (1)
     {
-        if ( reader->nbuffer+1 >= reader->mbuffer )
+        if ( reader->last_valid_record_idx+1 >= reader->mbuffer ) 
         {
             // Increase buffer size
             reader->mbuffer += 8;
@@ -426,12 +451,12 @@ static void _reader_fill_buffer(bcf_srs_t *files, bcf_sr_t *reader)
             if ( reader->type & FT_VCF )
             {
                 if ( (ret=hts_getline(reader->file, KS_SEP_LINE, &files->tmps)) < 0 ) break;   // no more lines
-                int ret = vcf_parse1(&files->tmps, reader->header, reader->buffer[reader->nbuffer+1]);
+                int ret = vcf_parse1(&files->tmps, reader->header, reader->buffer[reader->last_valid_record_idx+1]);
                 if ( ret<0 ) break;
             }
             else if ( reader->type & FT_BCF )
             {
-                if ( (ret=bcf_read1(reader->file, reader->header, reader->buffer[reader->nbuffer+1])) < 0 ) break; // no more lines
+                if ( (ret=bcf_read1(reader->file, reader->header, reader->buffer[reader->last_valid_record_idx+1])) < 0 ) break; // no more lines
             }
             else
             {
@@ -442,33 +467,35 @@ static void _reader_fill_buffer(bcf_srs_t *files, bcf_sr_t *reader)
         else if ( reader->tbx_idx )
         {
             if ( (ret=tbx_itr_next(reader->file, reader->tbx_idx, reader->itr, &files->tmps)) < 0 ) break;  // no more lines
-            vcf_parse1(&files->tmps, reader->header, reader->buffer[reader->nbuffer+1]);
+            vcf_parse1(&files->tmps, reader->header, reader->buffer[reader->last_valid_record_idx+1]);
         }
         else
         {
-            if ( (ret=bcf_itr_next(reader->file, reader->itr, reader->buffer[reader->nbuffer+1])) < 0 ) break; // no more lines
-            bcf_subset_format(reader->header,reader->buffer[reader->nbuffer+1]);
+            if ( (ret=bcf_itr_next(reader->file, reader->itr, reader->buffer[reader->last_valid_record_idx+1])) < 0 ) break; // no more lines
+            bcf_subset_format(reader->header,reader->buffer[reader->last_valid_record_idx+1]);
         }
 
         // apply filter
         if ( !reader->nfilter_ids )
-            bcf_unpack(reader->buffer[reader->nbuffer+1], BCF_UN_STR);
+            bcf_unpack(reader->buffer[reader->last_valid_record_idx+1], BCF_UN_STR);
         else
         {
-            bcf_unpack(reader->buffer[reader->nbuffer+1], BCF_UN_STR|BCF_UN_FLT);
-            if ( !has_filter(reader, reader->buffer[reader->nbuffer+1]) ) continue;
+            bcf_unpack(reader->buffer[reader->last_valid_record_idx+1], BCF_UN_STR|BCF_UN_FLT);
+            if ( !has_filter(reader, reader->buffer[reader->last_valid_record_idx+1]) ) continue;
         }
-        reader->nbuffer++;
+        reader->last_valid_record_idx++;
 
-        if ( reader->buffer[reader->nbuffer]->pos != reader->buffer[1]->pos ) break;    // the buffer is full
+        if ( reader->buffer[reader->last_valid_record_idx]->pos != reader->buffer[1]->pos ) break;    // the buffer is full
     }
     if ( ret<0 )
     {
         // done for this region
         tbx_itr_destroy(reader->itr);
-        reader->itr = NULL;
+        reader->itr = NULL; 
+        reader->eof = 1;
     }
-    if ( files->collapse && reader->nbuffer>=2 && reader->buffer[1]->pos==reader->buffer[2]->pos )
+    reader->nbuffer = reader->last_valid_record_idx;
+    if ( files->collapse && reader->last_valid_record_idx>=2 && reader->buffer[1]->pos==reader->buffer[2]->pos )
         collapse_buffer(files, reader);
 }
 
@@ -478,17 +505,33 @@ static void _reader_fill_buffer(bcf_srs_t *files, bcf_sr_t *reader)
 static void _reader_shift_buffer(bcf_sr_t *reader)
 {
     int i;
-    for (i=2; i<=reader->nbuffer; i++)
+    for (i=2; i<=reader->last_valid_record_idx; i++)
         if ( reader->buffer[i]->pos!=reader->buffer[1]->pos ) break;
+    //TODO: nbuffer and last_valid_record_idx maintain their relative offset (is it possible they don't?)
+    //Either i == nbuffer, meaning i/nbuffer is the first location that has different pos
+    //OR last set of records in file are being processed
+    ASSERT(i == reader->nbuffer || reader->eof);
+    int diff = reader->last_valid_record_idx - reader->nbuffer;
     if ( i<=reader->nbuffer )
     {
-        // A record with a different position follows, swap it. Because of the reader's logic,
-        // only one such line can be present.
-        bcf1_t *tmp = reader->buffer[1]; reader->buffer[1] = reader->buffer[i]; reader->buffer[i] = tmp;
+        ASSERT(i == reader->nbuffer);
+        // A record with a different position follows, swap it.
+        // For VCFs: Because of the reader's logic, only one such line can be present.
+        // For gVCFs: multiple lines can be present, from splits in vcfmerge for example
+        // Swap entries between [nbuffer:last_valid_record_idx] and [1:1+diff]
+        // Swap and not a simple move is necessary to free memory allocated for bcf1_t structures later
+        int j = 0;
+        for(j=0;j<=diff;++j)
+        {
+            bcf1_t *tmp = reader->buffer[1+j];
+            reader->buffer[1+j] = reader->buffer[i+j];
+            reader->buffer[i+j] = tmp;
+        }
         reader->nbuffer = 1;
     }
     else
         reader->nbuffer = 0;    // no other line
+    reader->last_valid_record_idx = reader->nbuffer + diff;
 }
 
 /*
@@ -506,7 +549,7 @@ static int _reader_match_alleles(bcf_srs_t *files, bcf_sr_t *reader, bcf1_t *tmp
     else
     {
         int tmpl_type = bcf_get_variant_types(tmpl);
-        for (i=1; i<=reader->nbuffer; i++)
+        for (i=1; i<=reader->last_valid_record_idx; i++)
         {
             bcf1_t *line = reader->buffer[i];
             if ( line->pos != reader->buffer[1]->pos ) break;  // done with this reader
@@ -559,9 +602,10 @@ static int _reader_match_alleles(bcf_srs_t *files, bcf_sr_t *reader, bcf1_t *tmp
     // and put the old bcf1_t record at the end.
     bcf1_t *tmp = reader->buffer[0];
     reader->buffer[0] = reader->buffer[irec];
-    for (i=irec+1; i<=reader->nbuffer; i++) reader->buffer[i-1] = reader->buffer[i];
-    reader->buffer[ reader->nbuffer ] = tmp;
+    for (i=irec+1; i<=reader->last_valid_record_idx; i++) reader->buffer[i-1] = reader->buffer[i];
+    reader->buffer[ reader->last_valid_record_idx ] = tmp;
     reader->nbuffer--;
+    reader->last_valid_record_idx--;
 
     return 0;
 }
@@ -583,8 +627,8 @@ int _reader_next_line(bcf_srs_t *files)
             _reader_fill_buffer(files, &files->readers[i]);
 
             // Update the minimum coordinate
-            if ( !files->readers[i].nbuffer ) continue;
-            if ( min_pos > files->readers[i].buffer[1]->pos )
+            if ( !files->readers[i].last_valid_record_idx ) continue;
+            if ( min_pos > files->readers[i].buffer[1]->pos ) 
             {
                 min_pos = files->readers[i].buffer[1]->pos;
                 chr = bcf_seqname(files->readers[i].header, files->readers[i].buffer[1]);
@@ -604,7 +648,7 @@ int _reader_next_line(bcf_srs_t *files)
             {
                 // Remove all lines with this position from the buffer
                 for (i=0; i<files->nreaders; i++)
-                    if ( files->readers[i].nbuffer && files->readers[i].buffer[1]->pos==min_pos )
+                    if ( files->readers[i].last_valid_record_idx && files->readers[i].buffer[1]->pos==min_pos ) 
                         _reader_shift_buffer(&files->readers[i]);
                 min_pos = INT_MAX;
                 continue;
@@ -623,7 +667,7 @@ int _reader_next_line(bcf_srs_t *files)
         files->has_line[i] = 0;
 
         // Skip readers with no records at this position
-        if ( !files->readers[i].nbuffer || files->readers[i].buffer[1]->pos!=min_pos ) continue;
+        if ( !files->readers[i].last_valid_record_idx || files->readers[i].buffer[1]->pos!=min_pos ) continue;
 
         // Until now buffer[0] of all reader was empty and the lines started at buffer[1].
         // Now lines which are ready to be output will be moved to buffer[0].
@@ -656,7 +700,7 @@ int bcf_sr_next_line(bcf_srs_t *files)
         for (i=0; i<files->nreaders; i++)
         {
             if ( !files->has_line[i] ) continue;
-            if ( files->readers[i].nbuffer==0 || files->readers[i].buffer[1]->pos!=files->readers[i].buffer[0]->pos ) continue;
+            if ( files->readers[i].last_valid_record_idx==0 || files->readers[i].buffer[1]->pos!=files->readers[i].buffer[0]->pos ) continue;
             break;
         }
         if ( i==files->nreaders ) return ret;   // no more lines left, output even if target alleles are not of the same type
