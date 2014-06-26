@@ -49,6 +49,12 @@ KSTREAM_DECLARE(gzFile, gzread)
     uint8_t bcf_type_shift[] = { 0, 0, 1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 static bcf_idinfo_t bcf_idinfo_def = { .info = { 15, 15, 15 }, .hrec = { NULL, NULL, NULL}, .id = -1 };
 
+#ifdef DEBUG
+#define ASSERT(x) assert(x)
+#else
+#define ASSERT(x) ;
+#endif
+
 /*************************
  *** VCF header parser ***
  *************************/
@@ -791,6 +797,8 @@ bcf1_t *bcf_init1()
 {
     bcf1_t *v;
     v = (bcf1_t*)calloc(1, sizeof(bcf1_t));
+    v->m_end_point = -1;
+    v->m_end_point_info_idx = -1;
     return v;
 }
 
@@ -822,6 +830,8 @@ void bcf_clear(bcf1_t *v)
     v->d.indiv_dirty  = 0;
     v->d.n_flt = 0;
     v->errcode = 0;
+    v->m_end_point = -1;
+    v->m_end_point_info_idx = -1;
     if (v->d.m_als) v->d.als[0] = 0;
     if (v->d.m_id) v->d.id[0] = 0;
 }
@@ -972,7 +982,11 @@ static inline void bcf1_sync_info(bcf1_t *line, kstring_t *str)
             while ( irm<=i && line->d.info[irm].vptr ) irm++;
         }
     }
-    if ( irm>=0 ) line->n_info = irm;
+    if ( irm>=0 ) 
+    {
+        line->n_info = irm;
+        line->m_end_point_info_idx = -1;
+    }
 }
 
 static int bcf1_sync(bcf1_t *line)
@@ -2600,10 +2614,11 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
     for (i=0; i<line->n_info; i++)
         if ( inf_id==line->d.info[i].key ) break;
     bcf_info_t *inf = i==line->n_info ? NULL : &line->d.info[i];
+    int is_end_tag = (i < line->n_info && i == line->m_end_point_info_idx);
 
     if ( !n || (type==BCF_HT_STR && !values) )
     {
-        if ( inf )
+        if ( inf && inf->vptr)
         {
             // Mark the tag for removal, free existing memory if necessary
             if ( inf->vptr_free )
@@ -2613,11 +2628,21 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
             }
             line->d.shared_dirty |= BCF1_DIRTY_INF;
             inf->vptr = NULL;
-	    int idx;
-	    //KG: shift elements of array d
-	    for(idx=i;idx<line->n_info-1;++idx)
-	      memcpy(&(line->d.info[idx]), &(line->d.info[idx+1]), sizeof(bcf_info_t));
+#if 0
+            //shift m_end_point_info_idx idx
+            if(line->m_end_point_info_idx >=0 && line->m_end_point_info_idx >= i)
+                --(line->m_end_point_info_idx);
+            int idx = 0;
+            //KG: shift elements of array d
+            for(idx=i;idx<line->n_info-1;++idx)
+                line->d.info[idx] = line->d.info[idx+1];
             --(line->n_info);       //KG: reduce n_info when tag is removed
+#endif
+            if(is_end_tag)      //deleting END tag, invalidate m_end_point_info_idx, set end to pos
+            {
+                line->m_end_point_info_idx = -1;
+                line->m_end_point = line->pos;
+            }
         }
         return 0;
     }
@@ -2641,12 +2666,11 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
         fprintf(stderr, "[E::%s] the type %d not implemented yet\n", __func__, type);
         abort();
     }
-
     // Is the INFO tag already present
     if ( inf )
     {
         // Is it big enough to accommodate new block?
-        if ( str.l <= inf->vptr_len + inf->vptr_off )
+        if (inf->vptr && str.l <= inf->vptr_len + inf->vptr_off )
         {
             if ( str.l != inf->vptr_len + inf->vptr_off ) line->d.shared_dirty |= BCF1_DIRTY_INF;
             uint8_t *ptr = inf->vptr - inf->vptr_off;
@@ -2673,6 +2697,17 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
         bcf_unpack_info_core1((uint8_t*)str.s, inf);
         inf->vptr_free = 1;
         line->d.shared_dirty |= BCF1_DIRTY_INF;
+        is_end_tag = (strcmp(key, "END") == 0);
+        if(is_end_tag)
+        {
+            ASSERT(line->m_end_point_info_idx < 0);
+            line->m_end_point_info_idx = line->n_info - 1;
+        }
+    }
+    if(is_end_tag && values)
+    {
+        ASSERT(n == 1 && type == BCF_HT_INT);
+        line->m_end_point = ((int32_t*)values)[0] - 1; //END is 1 based, m_end_point is 0 based
     }
     line->unpacked |= BCF_UN_INFO;
     return 0;
@@ -2733,9 +2768,9 @@ int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const
             line->d.indiv_dirty = 1;
             fmt->p = NULL;
             int idx;
-	    //KG: shift elements of array fmt
-	    for(idx=i;idx<line->n_fmt-1;++idx)
-	      memcpy(&(line->d.fmt[idx]), &(line->d.fmt[idx+1]), sizeof(bcf_fmt_t));
+            //KG: shift elements of array fmt
+            for(idx=i;idx<line->n_fmt-1;++idx)
+              memcpy(&(line->d.fmt[idx]), &(line->d.fmt[idx+1]), sizeof(bcf_fmt_t));
             --(line->n_fmt);
         }
         return 0;
@@ -2966,7 +3001,7 @@ bcf_info_t *bcf_get_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key)
     if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
     for (i=0; i<line->n_info; i++)
     {
-        if ( line->d.info[i].key==id ) return &line->d.info[i];
+        if ( line->d.info[i].key==id && line->d.info[i].vptr ) return &line->d.info[i];
     }
     return NULL;
 }
@@ -2980,7 +3015,7 @@ int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, voi
     if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
 
     for (i=0; i<line->n_info; i++)
-        if ( line->d.info[i].key==tag_id ) break;
+        if ( line->d.info[i].key==tag_id && line->d.info[i].vptr ) break;
     if ( i==line->n_info ) return ( type==BCF_HT_FLAG ) ? 0 : -3;       // the tag is not present in this record
     if ( type==BCF_HT_FLAG ) return 1;
 
@@ -3033,6 +3068,96 @@ switch (info->type) {
 }
 #undef BRANCH
 return -4;  // this can never happen
+}
+
+void bcf_set_end_point_from_info(const bcf_hdr_t* hdr, bcf1_t* line)
+{
+    ASSERT(line->unpacked & BCF_UN_INFO);
+    if(line->m_end_point >= 0)  //already read from info
+        return;
+    bcf_info_t* info = bcf_get_info(hdr, line, "END");
+    if(info)
+    {
+        ASSERT(info->type >= BCF_BT_INT8 && info->type <= BCF_BT_INT32 && info->len == 1);
+        line->m_end_point = info->v1.i - 1; //END value is 1 based, line->pos is 0 based, change to 0 based
+        line->m_end_point_info_idx = (int)((size_t)(info - line->d.info)); //index with respect to line->d.info
+    }
+    else        //no END tag, end is same as pos
+    {
+        line->m_end_point = line->pos;
+        line->m_end_point_info_idx = -1;
+    }
+}
+
+void bcf_set_end_point_in_info(const bcf_hdr_t* hdr, bcf1_t* line)
+{
+    ASSERT(line->unpacked & BCF_UN_INFO);
+    if(line->m_end_point < 0)
+        return;
+    ASSERT(line->pos <= line->m_end_point);
+    int tmp = line->m_end_point + 1; //END tag is 1 based
+    if(line->m_end_point_info_idx >= 0)
+    {
+#ifdef DEBUG
+        ASSERT(line->m_end_point_info_idx < line->n_info);
+        ASSERT(line->d.info[line->m_end_point_info_idx].type >= BCF_BT_INT8
+                && line->d.info[line->m_end_point_info_idx].type <= BCF_BT_INT32);
+        ASSERT(line->d.info[line->m_end_point_info_idx].len == 1);
+        int key_idx = line->d.info[line->m_end_point_info_idx].key;
+        ASSERT(key_idx >= 0 && key_idx < hdr->n[BCF_DT_ID]);
+        ASSERT(strcmp(hdr->id[BCF_DT_ID][key_idx].key,"END") == 0);
+#endif
+        if(line->d.info[line->m_end_point_info_idx].v1.i != tmp)
+        {
+            line->d.info[line->m_end_point_info_idx].v1.i = tmp; 
+            line->d.shared_dirty |= BCF1_DIRTY_INF;
+        }
+#if 0
+        //Value has changed
+        if(line->d.info[line->m_end_point_info_idx].v1.i != tmp)
+        {
+            int status = bcf_update_info_int32(hdr, line, "END", &tmp, 1);
+            ASSERT(status >= 0);
+        }
+        if(line->m_end_point != line->pos)      //different from start
+        {
+            int status = bcf_update_info_int32(hdr, line, "END", &tmp, 1);
+            ASSERT(status >= 0);
+        }
+        else    //END same as pos, delete the INFO key as it's a single location record
+        {
+            //m_end_point_info_idx and m_end_point are set within update_info
+            int status = bcf_update_info_int32(hdr, line, "END", &tmp, 1);
+            /*int status = bcf_update_info_int32(hdr, line, "END", 0, 0);*/
+            ASSERT(status >= 0);
+        }
+#endif
+    }
+    else        //END record does not exist
+        if(line->pos != line->m_end_point)      //END is actually different from pos
+        {
+#ifdef DEBUG
+            bcf_info_t* info = bcf_get_info(hdr, line, "END");
+            assert(info == 0);
+#endif
+            //m_end_point_info_idx and m_end_point are set within update_info
+            int status = bcf_update_info_int32(hdr, line, "END", &tmp, 1);
+            ASSERT(status >= 0);
+        }
+}
+
+int bcf_get_end_point(bcf1_t* line)
+{
+    ASSERT(line->unpacked & BCF_UN_INFO);
+    ASSERT(line->m_end_point >= 0);
+    return line->m_end_point;
+}
+
+void bcf_set_end_point(bcf1_t* line, int value)
+{
+    ASSERT(line->unpacked & BCF_UN_INFO);
+    ASSERT(line->pos <= value);
+    line->m_end_point = value;
 }
 
 int bcf_get_format_string(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, char ***dst, int *ndst)

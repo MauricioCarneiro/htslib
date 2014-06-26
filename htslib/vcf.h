@@ -225,9 +225,13 @@ typedef struct {
     int unpacked;           // remember what has been unpacked to allow calling bcf_unpack() repeatedly without redoing the work
     int unpack_size[3];     // the original block size of ID, REF+ALT and FILTER 
     int errcode;    // one of BCF_ERR_* codes
-    //FIXME: Horrible hack, I'm so sorry
+    //END pos - for fast access
+    int m_end_point;
+    int m_end_point_info_idx;
     //Flag which is 0 mostly, but if this record was produced by splitting a gVCF interval, then it's set to 1
-    int is_split_record; 
+    int m_is_split_record; 
+    int m_split_end_pos;
+    char m_split_ref_base;
 } bcf1_t;
 
 /*******
@@ -637,6 +641,16 @@ extern "C" {
     #define bcf_get_info_string(hdr,line,tag,dst,ndst) bcf_get_info_values(hdr,line,tag,(void**)(dst),ndst,BCF_HT_STR)
     #define bcf_get_info_flag(hdr,line,tag,dst,ndst)   bcf_get_info_values(hdr,line,tag,(void**)(dst),ndst,BCF_HT_FLAG)
     int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type);
+
+    //For fast access to END in INFO
+    void bcf_set_end_point_from_info(const bcf_hdr_t* hdr, bcf1_t* line);
+    void bcf_set_end_point_in_info(const bcf_hdr_t* hdr, bcf1_t* line);
+    int bcf_get_end_point(bcf1_t* line);
+    void bcf_set_end_point(bcf1_t* line, int value);
+    #define bcf_set_split_end_point(rec, value)   (rec)->m_split_end_pos = (value)
+    #define bcf_get_split_end_point(rec)          ((rec)->m_split_end_pos)
+    #define bcf_set_split_ref_base(rec, value)    (rec)->m_split_ref_base = (value)
+    #define bcf_get_split_ref_base(rec)           ((rec)->m_split_ref_base)  
 
     /**
      *  bcf_get_format_*() - same as bcf_get_info*() above
