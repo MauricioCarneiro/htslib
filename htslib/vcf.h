@@ -145,7 +145,8 @@ extern uint8_t bcf_type_shift[];
 #define VCF_SNP   1
 #define VCF_MNP   2
 #define VCF_INDEL 4
-#define VCF_OTHER 8
+#define VCF_NON_REF 8
+#define VCF_OTHER 16
 
 typedef struct {
     int type, n;    // variant type and the number of bases affected, negative for deletions
@@ -232,6 +233,10 @@ typedef struct {
     int m_is_split_record; 
     int m_split_end_pos;
     char m_split_ref_base;
+    //Does this record contain NON_REF variant
+    int m_non_ref_idx;
+    //preprocessed already - used in merge, calloc sets to 0
+    int m_is_preprocessed;
 } bcf1_t;
 
 /*******
@@ -563,6 +568,8 @@ extern "C" {
     #define bcf_update_info_float(hdr,line,key,values,n)   bcf_update_info((hdr),(line),(key),(values),(n),BCF_HT_REAL)
     #define bcf_update_info_flag(hdr,line,key,string,n)    bcf_update_info((hdr),(line),(key),(string),(n),BCF_HT_FLAG)
     #define bcf_update_info_string(hdr,line,key,string)    bcf_update_info((hdr),(line),(key),(string),1,BCF_HT_STR)
+    int bcf_update_info_struct(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type, 
+        bcf_info_t* inf, int inf_id);
     int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type);
 
     /*
@@ -586,6 +593,7 @@ extern "C" {
     #define bcf_update_format_char(hdr,line,key,values,n) bcf_update_format((hdr),(line),(key),(values),(n),BCF_HT_STR)
     #define bcf_update_genotypes(hdr,line,gts,n) bcf_update_format((hdr),(line),"GT",(gts),(n),BCF_HT_INT)     // See bcf_gt_ macros below
     int bcf_update_format_string(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const char **values, int n);
+    int bcf_update_format_struct(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type, bcf_fmt_t* fmt, int fmt_id);
     int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type);
 
     // Macros for setting genotypes correctly, for use with bcf_update_genotypes only; idx corresponds
@@ -641,6 +649,7 @@ extern "C" {
     #define bcf_get_info_string(hdr,line,tag,dst,ndst) bcf_get_info_values(hdr,line,tag,(void**)(dst),ndst,BCF_HT_STR)
     #define bcf_get_info_flag(hdr,line,tag,dst,ndst)   bcf_get_info_values(hdr,line,tag,(void**)(dst),ndst,BCF_HT_FLAG)
     int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type);
+    int bcf_unpack_info_values(const bcf_hdr_t *hdr, bcf1_t *line, bcf_info_t* info, void **dst, int *ndst, int type);
 
     //For fast access to END in INFO
     void bcf_set_end_point_from_info(const bcf_hdr_t* hdr, bcf1_t* line);
@@ -697,6 +706,11 @@ extern "C" {
      */
     int bcf_hdr_id2int(const bcf_hdr_t *hdr, int type, const char *id);
     #define bcf_hdr_int2id(hdr,type,int_id) ((hdr)->id[type][int_id].key)
+        //Cannot use bcf_hdr_id2int directly because if there is a field with the same key in 
+        //FORMAT and INFO, bcf_hdr_id2int will return the first found
+        //dict_type = BCF_DT_*
+        //field_type = BCF_HL_*
+        int bcf_hdr_field_name2id(bcf_hdr_t* hdr, const char* key, int dict_type, int field_type);
 
     /**
      *  bcf_hdr_name2id() - Translates sequence names (chromosomes) into numeric ID
@@ -726,6 +740,7 @@ extern "C" {
     #define bcf_hdr_id2coltype(hdr,type,int_id) ((hdr)->id[BCF_DT_ID][int_id].val->info[type] & 0xf)
     #define bcf_hdr_idinfo_exists(hdr,type,int_id)  ((int_id<0 || bcf_hdr_id2coltype(hdr,type,int_id)==0xf) ? 0 : 1)
     #define bcf_hdr_id2hrec(hdr,dict_type,col_type,int_id)    ((hdr)->id[(dict_type)==BCF_DT_CTG?BCF_DT_CTG:BCF_DT_ID][int_id].val->hrec[(dict_type)==BCF_DT_CTG?0:(col_type)])
+    void bcf_hdr_set_length_descriptor(bcf_hdr_t* hdr, int field_type, int id, int length_descriptor);
 
     void bcf_fmt_array(kstring_t *s, int n, int type, void *data);
     uint8_t *bcf_fmt_sized_array(kstring_t *s, uint8_t *ptr);

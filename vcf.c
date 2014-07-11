@@ -61,6 +61,28 @@ static bcf_idinfo_t bcf_idinfo_def = { .info = { 15, 15, 15 }, .hrec = { NULL, N
 
 int bcf_hdr_sync(bcf_hdr_t *h);
 
+//Cannot use bcf_hdr_id2int directly because if there is a field with the same key in 
+//FORMAT and INFO, bcf_hdr_id2int will return the first found
+int bcf_hdr_field_name2id(bcf_hdr_t* hdr, const char* key, int dict_type, int field_type)
+{
+    int i = 0;
+    for(i=0;i<hdr->n[dict_type];++i)        //iterate over ID key-value pairs
+    {
+        bcf_idpair_t* curr_pair = &(hdr->id[dict_type][i]);
+        if(curr_pair->key == 0) //deleted
+            continue;
+        //is this an INFO/FORMAT/FILTER field?
+        int is_correct_type = (dict_type == BCF_DT_ID) ? bcf_hdr_idinfo_exists(hdr, field_type, i) : 1;
+        if(is_correct_type)
+        {
+            const char* key_string = curr_pair->key;
+            if(strcmp(key, key_string) == 0)
+                return i;
+        }
+    }
+    return -1;
+}
+
 int bcf_hdr_add_sample(bcf_hdr_t *h, const char *s)
 {
     if ( !s )
@@ -615,9 +637,28 @@ void bcf_hdr_remove(bcf_hdr_t *hdr, int type, const char *key)
                 if ( hdr->hrec[i]==hrec ) break;
             assert( i<hdr->nhrec );
 
-            vdict_t *d = type==BCF_HL_CTG ? (vdict_t*)hdr->dict[BCF_DT_CTG] : (vdict_t*)hdr->dict[BCF_DT_ID];
-            khint_t k = kh_get(vdict, d, key);
-            kh_val(d, k).hrec[type==BCF_HL_CTG?0:type] = NULL;
+            int dict_type = (type == BCF_HL_CTG) ? BCF_DT_CTG : BCF_DT_ID;
+            bcf_idinfo_t* idinfo_val = 0;
+            int id = -1;
+            if(dict_type == BCF_DT_ID)
+            {
+                id = bcf_hdr_field_name2id(hdr, key, dict_type, type);
+                ASSERT(id >= 0 && id < hdr->n[dict_type]);
+                idinfo_val = (bcf_idinfo_t*)(hdr->id[dict_type][id].val);
+                ASSERT(idinfo_val);
+            }
+            else
+            {
+                vdict_t *d = (vdict_t*)(hdr->dict[dict_type]);
+                khint_t k = kh_get(vdict, d, key);
+                idinfo_val = &(kh_val(d, k));
+                id = idinfo_val->id;
+            }
+            idinfo_val->hrec[type==BCF_HL_CTG?0:type] = NULL;
+            idinfo_val->info[type==BCF_HL_CTG?0:type] = 0xf;
+            //Set id[][].key and val to 0 also
+            hdr->id[dict_type][id].key = 0;
+            hdr->id[dict_type][id].val = 0;
         }
         else
         {
@@ -666,6 +707,39 @@ int bcf_hdr_printf(bcf_hdr_t *hdr, const char *fmt, ...)
     return ret;
 }
 
+char* g_length_descriptor_strings[] = {
+    0, //BCF_VL_FIXED
+    ".",
+    "A",
+    "G",
+    "R"
+};
+//length_descriptor == BCF_VL_*
+void bcf_hdr_set_length_descriptor(bcf_hdr_t* hdr, int field_type, int id, int length_descriptor)
+{
+    int dict_type = (field_type == BCF_HL_CTG) ? BCF_DT_CTG : BCF_DT_ID; 
+    ASSERT(id >=0 && id < hdr->n[dict_type] && hdr->id[dict_type][id].key);
+    int curr_val = hdr->id[dict_type][id].val->info[field_type];
+    curr_val = (curr_val & ~(0x0f << 8)) | ((length_descriptor & 0xf) << 8);       //zero out length descriptor bits, set new length
+    //HACK - converted const to un-const :(
+    ((bcf_idinfo_t*)hdr->id[dict_type][id].val)->info[field_type] = curr_val;
+    char length_descriptor_string[64];
+    if(length_descriptor == BCF_VL_FIXED)
+        sprintf(length_descriptor_string,"%d",bcf_hdr_id2number(hdr, field_type, id));
+    else
+        strcpy(length_descriptor_string, g_length_descriptor_strings[length_descriptor]);
+    //Update value in hrec also
+    bcf_hrec_t* hrec = bcf_hdr_id2hrec(hdr, dict_type,field_type, id);
+    ASSERT(hrec);
+    int i = 0;
+    for(i=0;i<hrec->nkeys;++i)
+        if(strcmp(hrec->keys[i], "Number") == 0)
+        {
+            hrec->vals[i] = realloc(hrec->vals[i], strlen(length_descriptor_string)+1);
+            strcpy(hrec->vals[i], length_descriptor_string);
+            break;
+        }
+}
 
 /**********************
  *** BCF header I/O ***
@@ -799,6 +873,7 @@ bcf1_t *bcf_init1()
     v = (bcf1_t*)calloc(1, sizeof(bcf1_t));
     v->m_end_point = -1;
     v->m_end_point_info_idx = -1;
+    v->m_non_ref_idx = -1;
     return v;
 }
 
@@ -832,6 +907,7 @@ void bcf_clear(bcf1_t *v)
     v->errcode = 0;
     v->m_end_point = -1;
     v->m_end_point_info_idx = -1;
+    v->m_non_ref_idx = -1;
     if (v->d.m_als) v->d.als[0] = 0;
     if (v->d.m_id) v->d.id[0] = 0;
 }
@@ -2528,8 +2604,9 @@ static void bcf_set_variant_type(const char *ref, const char *alt, variant_t *va
     if ( alt[0]=='<' )
     {
         if ( alt[1]=='X' && alt[2]=='>' ) { var->n = 0; var->type = VCF_REF; return; }  // mpileup's X allele shouldn't be treated as variant
-        var->type = VCF_OTHER;
-        return;
+        if( strncmp(alt, "<NON_REF>", 9) == 0)  { var->type = VCF_NON_REF; return; } 
+        var->type = VCF_OTHER; 
+        return; 
     }
 
     const char *r = ref, *a = alt;
@@ -2589,6 +2666,8 @@ static void bcf_set_variant_types(bcf1_t *b)
     {
         bcf_set_variant_type(d->allele[0],d->allele[i], &d->var[i]);
         b->d.var_type |= d->var[i].type;
+        if(d->var[i].type == VCF_NON_REF)
+            b->m_non_ref_idx = i;
         //fprintf(stderr,"[set_variant_type] %d   %s %s -> %d %d .. %d\n", b->pos+1,d->allele[0],d->allele[i],d->var[i].type,d->var[i].n, b->d.var_type);
     }
 }
@@ -2604,18 +2683,11 @@ int bcf_get_variant_type(bcf1_t *rec, int ith_allele)
     return rec->d.var[ith_allele].type;
 }
 
-int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type)
+int bcf_update_info_struct(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type, 
+        bcf_info_t* inf, int inf_id)
 {
-    // Is the field already present?
-    int i, inf_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
-    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,inf_id) ) return -1;    // No such INFO field in the header
-    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
-
-    for (i=0; i<line->n_info; i++)
-        if ( inf_id==line->d.info[i].key ) break;
-    bcf_info_t *inf = i==line->n_info ? NULL : &line->d.info[i];
-    int is_end_tag = (i < line->n_info && i == line->m_end_point_info_idx);
-
+    int idx = (inf == 0) ? line->n_info : (int)((size_t)(inf - line->d.info));
+    int is_end_tag = (idx < line->n_info && idx == line->m_end_point_info_idx);
     if ( !n || (type==BCF_HT_STR && !values) )
     {
         if ( inf && inf->vptr)
@@ -2628,16 +2700,6 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
             }
             line->d.shared_dirty |= BCF1_DIRTY_INF;
             inf->vptr = NULL;
-#if 0
-            //shift m_end_point_info_idx idx
-            if(line->m_end_point_info_idx >=0 && line->m_end_point_info_idx >= i)
-                --(line->m_end_point_info_idx);
-            int idx = 0;
-            //KG: shift elements of array d
-            for(idx=i;idx<line->n_info-1;++idx)
-                line->d.info[idx] = line->d.info[idx+1];
-            --(line->n_info);       //KG: reduce n_info when tag is removed
-#endif
             if(is_end_tag)      //deleting END tag, invalidate m_end_point_info_idx, set end to pos
             {
                 line->m_end_point_info_idx = -1;
@@ -2646,7 +2708,6 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
         }
         return 0;
     }
-
     // Encode the values and determine the size required to accommodate the values
     kstring_t str = {0,0,0};
     bcf_enc_int1(&str, inf_id);
@@ -2713,6 +2774,19 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
     return 0;
 }
 
+int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type)
+{
+    // Is the field already present?
+    int i, inf_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
+    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,inf_id) ) return -1;    // No such INFO field in the header
+    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
+
+    for (i=0; i<line->n_info; i++)
+        if ( inf_id==line->d.info[i].key ) break;
+    bcf_info_t *inf = i==line->n_info ? NULL : &line->d.info[i];
+    return bcf_update_info_struct(hdr, line, key, values, n, type, inf, inf_id); 
+}
+
 int bcf_update_format_string(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const char **values, int n)
 {
     if ( !n )
@@ -2739,22 +2813,8 @@ int bcf_update_format_string(const bcf_hdr_t *hdr, bcf1_t *line, const char *key
     return ret;
 }
 
-int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type)
+int bcf_update_format_struct(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type, bcf_fmt_t* fmt, int fmt_id)
 {
-    // Is the field already present?
-    int i, fmt_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
-    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_FMT,fmt_id) )
-    {
-        if ( !n ) return 0;
-        return -1;  // the key not present in the header
-    }
-
-    if ( !(line->unpacked & BCF_UN_FMT) ) bcf_unpack(line, BCF_UN_FMT);
-
-    for (i=0; i<line->n_fmt; i++)
-        if ( line->d.fmt[i].id==fmt_id ) break;
-    bcf_fmt_t *fmt = i==line->n_fmt ? NULL : &line->d.fmt[i];
-
     if ( !n )
     {
         if ( fmt )
@@ -2767,11 +2827,6 @@ int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const
             }
             line->d.indiv_dirty = 1;
             fmt->p = NULL;
-            int idx;
-            //KG: shift elements of array fmt
-            for(idx=i;idx<line->n_fmt-1;++idx)
-              memcpy(&(line->d.fmt[idx]), &(line->d.fmt[idx+1]), sizeof(bcf_fmt_t));
-            --(line->n_fmt);
         }
         return 0;
     }
@@ -2801,6 +2856,7 @@ int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const
         abort();
     }
 
+    int i = 0;
     if ( !fmt )
     {
         // Not present, new format field
@@ -2844,6 +2900,24 @@ int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const
     }
     line->unpacked |= BCF_UN_FMT;
     return 0;
+}
+
+int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type)
+{
+    // Is the field already present?
+    int i, fmt_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
+    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_FMT,fmt_id) )
+    {
+        if ( !n ) return 0;
+        return -1;  // the key not present in the header
+    }
+
+    if ( !(line->unpacked & BCF_UN_FMT) ) bcf_unpack(line, BCF_UN_FMT);
+
+    for (i=0; i<line->n_fmt; i++)
+        if ( line->d.fmt[i].id==fmt_id ) break;
+    bcf_fmt_t *fmt = i==line->n_fmt ? NULL : &line->d.fmt[i];
+    return bcf_update_format_struct(hdr, line, key, values, n, type, fmt, fmt_id);
 }
 
 
@@ -2923,6 +2997,7 @@ static inline int _bcf1_sync_alleles(const bcf_hdr_t *hdr, bcf1_t *line, int nal
         als++;
         n++;
     }
+    bcf_set_variant_types(line);
     return 0;
 }
 int bcf_update_alleles(const bcf_hdr_t *hdr, bcf1_t *line, const char **alleles, int nals)
@@ -3006,20 +3081,11 @@ bcf_info_t *bcf_get_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key)
     return NULL;
 }
 
-int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type)
+int bcf_unpack_info_values(const bcf_hdr_t *hdr, bcf1_t *line, bcf_info_t* info, void **dst, int *ndst, int type)
 {
-    int i,j, tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, tag);
-    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,tag_id) ) return -1;    // no such INFO field in the header
-    if ( bcf_hdr_id2type(hdr,BCF_HL_INFO,tag_id)!=type ) return -2;     // expected different type
-
-    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
-
-    for (i=0; i<line->n_info; i++)
-        if ( line->d.info[i].key==tag_id && line->d.info[i].vptr ) break;
-    if ( i==line->n_info ) return ( type==BCF_HT_FLAG ) ? 0 : -3;       // the tag is not present in this record
-    if ( type==BCF_HT_FLAG ) return 1;
-
-    bcf_info_t *info = &line->d.info[i];
+    ASSERT(line);
+    if (type==BCF_HT_FLAG)
+        return 1;
     if ( type==BCF_HT_STR )
     {
         if ( *ndst < info->len+1 )
@@ -3047,27 +3113,45 @@ int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, voi
         return 1;
     }
 
+    int j = 0;
 #define BRANCH(type_t, is_missing, is_vector_end, set_missing, out_type_t) { \
-    out_type_t *tmp = (out_type_t *) *dst; \
-    type_t *p = (type_t *) info->vptr; \
-    for (j=0; j<info->len; j++) \
-    { \
-        if ( is_vector_end ) return j; \
-        if ( is_missing ) set_missing; \
-        else *tmp = p[j]; \
-        tmp++; \
-    } \
-    return j; \
-}
-switch (info->type) {
-    case BCF_BT_INT8:  BRANCH(int8_t,  p[j]==bcf_int8_missing,  p[j]==bcf_int8_vector_end,  *tmp=bcf_int32_missing, int32_t); break;
-    case BCF_BT_INT16: BRANCH(int16_t, p[j]==bcf_int16_missing, p[j]==bcf_int16_vector_end, *tmp=bcf_int32_missing, int32_t); break;
-    case BCF_BT_INT32: BRANCH(int32_t, p[j]==bcf_int32_missing, p[j]==bcf_int32_vector_end, *tmp=bcf_int32_missing, int32_t); break;
-    case BCF_BT_FLOAT: BRANCH(float,   bcf_float_is_missing(p[j]), bcf_float_is_vector_end(p[j]), bcf_float_set_missing(*tmp), float); break;
-    default: fprintf(stderr,"TODO: %s:%d .. info->type=%d\n", __FILE__,__LINE__, info->type); exit(1);
-}
+        out_type_t *tmp = (out_type_t *) *dst; \
+        type_t *p = (type_t *) info->vptr; \
+        for (j=0; j<info->len; j++) \
+        { \
+            if ( is_vector_end ) return j; \
+            if ( is_missing ) set_missing; \
+            else *tmp = p[j]; \
+            tmp++; \
+        } \
+        return j; \
+    }
+    switch (info->type) {
+        case BCF_BT_INT8:  BRANCH(int8_t,  p[j]==bcf_int8_missing,  p[j]==bcf_int8_vector_end,  *tmp=bcf_int32_missing, int32_t); break;
+        case BCF_BT_INT16: BRANCH(int16_t, p[j]==bcf_int16_missing, p[j]==bcf_int16_vector_end, *tmp=bcf_int32_missing, int32_t); break;
+        case BCF_BT_INT32: BRANCH(int32_t, p[j]==bcf_int32_missing, p[j]==bcf_int32_vector_end, *tmp=bcf_int32_missing, int32_t); break;
+        case BCF_BT_FLOAT: BRANCH(float,   bcf_float_is_missing(p[j]), bcf_float_is_vector_end(p[j]), bcf_float_set_missing(*tmp), float); break;
+        default: fprintf(stderr,"TODO: %s:%d .. info->type=%d\n", __FILE__,__LINE__, info->type); exit(1);
+    }
 #undef BRANCH
-return -4;  // this can never happen
+    return -4;  // this can never happen
+}
+
+int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type)
+{
+    int i, tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, tag);
+    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,tag_id) ) return -1;    // no such INFO field in the header
+    if ( bcf_hdr_id2type(hdr,BCF_HL_INFO,tag_id)!=type ) return -2;     // expected different type
+
+    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
+
+    for (i=0; i<line->n_info; i++)
+        if ( line->d.info[i].key==tag_id && line->d.info[i].vptr ) break;
+    if ( i==line->n_info ) return ( type==BCF_HT_FLAG ) ? 0 : -3;       // the tag is not present in this record
+    if ( type==BCF_HT_FLAG ) return 1;
+
+    bcf_info_t *info = &line->d.info[i];
+    return bcf_unpack_info_values(hdr, line, info, dst, ndst, type);
 }
 
 void bcf_set_end_point_from_info(const bcf_hdr_t* hdr, bcf1_t* line)
