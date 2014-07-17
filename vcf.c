@@ -2666,6 +2666,7 @@ static void bcf_set_variant_types(bcf1_t *b)
     }
     int i;
     b->d.var_type = 0;
+    b->d.var[0].type = VCF_REF;
     for (i=1; i<b->n_allele; i++)
     {
         bcf_set_variant_type(d->allele[0],d->allele[i], &d->var[i]);
