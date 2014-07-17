@@ -887,6 +887,8 @@ void bcf_clear(bcf1_t *v)
             free(v->d.info[i].vptr - v->d.info[i].vptr_off);
             v->d.info[i].vptr_free = 0;
         }
+        v->d.info[i].vptr = 0;
+        v->d.info[i].key = -1;
     }
     for (i=0; i<v->d.m_fmt; i++)
     {
@@ -895,6 +897,8 @@ void bcf_clear(bcf1_t *v)
             free(v->d.fmt[i].p - v->d.fmt[i].p_off);
             v->d.fmt[i].p_free = 0;
         }
+        v->d.fmt[i].p = 0;
+        v->d.fmt[i].id = -1;
     }
     v->rid = v->pos = v->rlen = v->unpacked = 0;
     bcf_float_set_missing(v->qual);
@@ -2757,6 +2761,7 @@ int bcf_update_info_struct(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, 
         inf = &line->d.info[line->n_info-1];
         bcf_unpack_info_core1((uint8_t*)str.s, inf);
         inf->vptr_free = 1;
+        line->d.info[line->n_info-1].key = inf_id;
         line->d.shared_dirty |= BCF1_DIRTY_INF;
         is_end_tag = (strcmp(key, "END") == 0);
         if(is_end_tag)
