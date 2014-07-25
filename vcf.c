@@ -3288,24 +3288,10 @@ int bcf_get_format_string(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, c
     return n;
 }
 
-int bcf_get_format_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type)
+int bcf_unpack_format_values(const bcf_hdr_t *hdr, bcf1_t *line, bcf_fmt_t* fmt, void **dst, int *ndst, int type)
 {
-    int i,j, tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, tag);
-    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_FMT,tag_id) ) return -1;    // no such FORMAT field in the header
-    if ( tag[0]=='G' && tag[1]=='T' && tag[2]==0 )
-    {
-        // Ugly: GT field is considered to be a string by the VCF header but BCF represents it as INT.
-        if ( bcf_hdr_id2type(hdr,BCF_HL_FMT,tag_id)!=BCF_HT_STR ) return -2;
-    }
-    else if ( bcf_hdr_id2type(hdr,BCF_HL_FMT,tag_id)!=type ) return -2;     // expected different type
-
-    if ( !(line->unpacked & BCF_UN_FMT) ) bcf_unpack(line, BCF_UN_FMT);
-
-    for (i=0; i<line->n_fmt; i++)
-        if ( line->d.fmt[i].id==tag_id ) break;
-    if ( i==line->n_fmt ) return -3;                               // the tag is not present in this record
-    bcf_fmt_t *fmt = &line->d.fmt[i];
-
+    int i = 0;
+    int j = 0;
     if ( type==BCF_HT_STR )
     {
         int n = fmt->n*bcf_hdr_nsamples(hdr);
@@ -3354,5 +3340,25 @@ switch (fmt->type) {
 }
 #undef BRANCH
 return nsmpl*fmt->n;
+}
+
+int bcf_get_format_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type)
+{
+    int i, tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, tag);
+    if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_FMT,tag_id) ) return -1;    // no such FORMAT field in the header
+    if ( tag[0]=='G' && tag[1]=='T' && tag[2]==0 )
+    {
+        // Ugly: GT field is considered to be a string by the VCF header but BCF represents it as INT.
+        if ( bcf_hdr_id2type(hdr,BCF_HL_FMT,tag_id)!=BCF_HT_STR ) return -2;
+    }
+    else if ( bcf_hdr_id2type(hdr,BCF_HL_FMT,tag_id)!=type ) return -2;     // expected different type
+
+    if ( !(line->unpacked & BCF_UN_FMT) ) bcf_unpack(line, BCF_UN_FMT);
+
+    for (i=0; i<line->n_fmt; i++)
+        if ( line->d.fmt[i].id==tag_id ) break;
+    if ( i==line->n_fmt ) return -3;                               // the tag is not present in this record
+    bcf_fmt_t *fmt = &line->d.fmt[i];
+    return bcf_unpack_format_values(hdr, line, fmt, dst, ndst, type);
 }
 
