@@ -15,6 +15,7 @@ lib*.so.*
 /test/sam
 /test/test-vcf-api
 /test/test-vcf-sweep
+/test/test-vcf-direct
 /test/test_view
 /test/*.tmp
 /test/*.tmp.*
