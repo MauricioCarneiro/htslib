@@ -55,7 +55,6 @@ void speed_check(char** argv)
     }
     uint64_t sum_num_info = 0;
     unsigned num_lines = 0;
-    int k = 0;
     struct timeval t1, t2;
     uint64_t total_time = 0;
     while(1)
@@ -104,11 +103,34 @@ void functional_check(char** argv)
 #else
     line = bcf_init();
 #endif
-    int end_point_id = bcf_hdr_id2int(hdr, BCF_DT_ID, "END"); 
-    assert(end_point_id >= 0);
+    int i = 0;
+    int info_ids[50];
+    int num_info_fields = 0;
+    for(i=0;i<hdr->n[BCF_DT_ID];++i)
+        if(bcf_hdr_idinfo_exists(hdr, BCF_HL_INFO, i))
+            info_ids[num_info_fields++] = i;
+#define ERASE_SIZE 1
+#define ADD_SIZE 1
+    int erase_ids[ERASE_SIZE];
+    for(i=0;i<ERASE_SIZE;++i)
+    {
+        erase_ids[i] = info_ids[rand()%num_info_fields];
+        fprintf(stderr,"Erasing: %s\n",bcf_hdr_int2id(hdr, BCF_DT_ID, erase_ids[i]));
+    }
+    int add_ids[ADD_SIZE];
+    for(i=0;i<ADD_SIZE;++i)
+    {
+        add_ids[i] = info_ids[rand()%num_info_fields];
+        fprintf(stderr,"Adding: %s\n",bcf_hdr_int2id(hdr, BCF_DT_ID, add_ids[i]));
+    }
+
+    unsigned data_array[] = { 56, 56, 56, 56, 67, 64, 60 };
+
+    int hdr_length = 0;
+    printf("%s",bcf_hdr_fmt_text(hdr, 0, &hdr_length));
+
     unsigned long long sum_interval_length = 0;
     unsigned num_lines = 0;
-    int new_value = 0;
     kstring_t debug_string = { 0, 0, 0 };
     while(1)
     {
@@ -116,25 +138,21 @@ void functional_check(char** argv)
         if(status < 0)
             break;
         bcf_unpack(line, BCF_UN_INFO);
-        bcf_update_info(hdr, line, "END", 0, 0, BCF_HT_INT);
-        bcf_info_t* end_info = bcf_get_info_idx(line, end_point_id);
-        if(end_info)
-        {
-            sum_interval_length += (end_info->v1.i - line->pos);
-            new_value = end_info->v1.i + 1;
-        }
-        else
-        {
-            ++sum_interval_length;
-            new_value = line->pos + 2;
-        }
+
+        for(i=0;i<ERASE_SIZE;++i)
+            bcf_update_info(hdr, line, bcf_hdr_int2id(hdr, BCF_DT_ID, erase_ids[i]), 0, 0, bcf_hdr_id2type(hdr, BCF_HL_INFO, erase_ids[i])); 
+        for(i=0;i<ADD_SIZE;++i)
+            bcf_update_info(hdr, line, bcf_hdr_int2id(hdr, BCF_DT_ID, add_ids[i]), (void*)data_array, 
+                   bcf_hdr_id2number(hdr, BCF_HL_INFO, add_ids[i]), bcf_hdr_id2type(hdr, BCF_HL_INFO, add_ids[i])); 
+        
         /*bcf_update_info(hdr, line, "END", &new_value, 1, BCF_HT_INT);*/
         //calls bcf1_sync internally
         debug_string.l = 0;
         vcf_format(hdr, line, &debug_string);
+        printf("%s",debug_string.s);
         ++num_lines;
     }
-    printf("Average interval length %llu\n",sum_interval_length/num_lines);
+    fprintf(stderr,"Average interval length %llu\n",sum_interval_length/num_lines);
 
     if(debug_string.m > 0)
         free(debug_string.s);
@@ -145,7 +163,8 @@ void functional_check(char** argv)
 int main(int argc, char** argv)
 {
   assert(argc >= 2 && "Requires 1 argument <vcf/bcf> file name");
-  speed_check(argv);
+  /*speed_check(argv);*/
+  functional_check(argv);
   return 0;
 }
 

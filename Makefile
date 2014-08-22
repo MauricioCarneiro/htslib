@@ -30,7 +30,7 @@ RANLIB = ranlib
 CPPFLAGS = -I. -DSAMTOOLS=1
 # TODO: probably update cram code to make it compile cleanly with -Wc++-compat
 ifdef DEBUG
-    CFLAGS = -g -g3 -Wall
+    CFLAGS = -g -g3 -Wall -DDEBUG
 else
     CFLAGS = -Wall -O3
 endif

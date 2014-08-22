@@ -874,6 +874,30 @@ void bcf_destroy1(bcf1_t *v)
     free(v);
 }
 
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+void set_num_fields_in_decode(const bcf_hdr_t* hdr, bcf1_t* v)
+{
+    int new_value = hdr->n[BCF_DT_ID];
+    if(v->d.m_num_indexes < new_value)
+    {
+        v->d.m_num_indexes = new_value;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+        v->d.m_info_idx_to_info_ptr = (bcf_info_t**)realloc(v->d.m_info_idx_to_info_ptr, new_value*sizeof(bcf_info_t*));
+#else
+        if(v->d.m_info < new_value)
+        {
+            int old_value = v->d.m_info;
+            hts_expand(bcf_info_t, new_value, v->d.m_info, v->d.info);
+            //Set expanded values to invalid
+            int i = 0;
+            for(i=old_value;i<new_value;++i)
+                v->d.info[i].vptr = 0;
+        }
+#endif
+    }
+}
+#endif
+
 static inline int bcf_read1_core(BGZF *fp, bcf1_t *v)
 {
     uint32_t x[8];
@@ -949,6 +973,9 @@ int bcf_subset_format(const bcf_hdr_t *hdr, bcf1_t *rec)
 int bcf_read(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
 {
     if (!fp->is_bin) return vcf_read(fp,h,v);
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     int ret = bcf_read1_core(fp->fp.bgzf, v);
     if ( ret!=0 || !h->keep_samples ) return ret;
     return bcf_subset_format(h,v);
@@ -1224,6 +1251,9 @@ int bcf_write(htsFile *hfp, const bcf_hdr_t *h, bcf1_t *v)
         fprintf(stderr,"[%s:%d %s] Unchecked error (%d), exiting.\n", __FILE__,__LINE__,__FUNCTION__,v->errcode);
         exit(1);
     }
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     bcf1_sync(v);   // check if the BCF record was modified
 
     BGZF *fp = hfp->fp.bgzf;
@@ -1945,6 +1975,9 @@ int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
 int vcf_read(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
 {
     int ret;
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     ret = hts_getline(fp, KS_SEP_LINE, &fp->line);
     if (ret < 0) return -1;
     return vcf_parse1(&fp->line, h, v);
@@ -2198,6 +2231,9 @@ int vcf_write_line(htsFile *fp, kstring_t *line)
 int vcf_write(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
 {
     int ret;
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     fp->line.l = 0;
     vcf_format1(h, v, &fp->line);
     if ( fp->is_compressed==1 )
@@ -2755,6 +2791,9 @@ int bcf_get_variant_type(bcf1_t *rec, int ith_allele)
 
 int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type)
 {
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(hdr, line);
+#endif
     // Is the field already present?
     int inf_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
     if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,inf_id) ) return -1;    // No such INFO field in the header
@@ -3139,7 +3178,7 @@ bcf_fmt_t *bcf_get_fmt_idx(bcf1_t *line, const int idx)
 
 bcf_info_t *bcf_get_info_idx(bcf1_t *line, const int idx) 
 {
-    /*if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);*/
+    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
 #ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
     ASSERT(idx < line->d.m_num_indexes);
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
