@@ -878,20 +878,25 @@ void bcf_destroy1(bcf1_t *v)
 void set_num_fields_in_decode(const bcf_hdr_t* hdr, bcf1_t* v)
 {
     int new_value = hdr->n[BCF_DT_ID];
-    if(v->d.m_num_indexes < new_value)
+    int old_value = v->d.m_num_indexes;
+    if(old_value < new_value)
     {
         v->d.m_num_indexes = new_value;
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
         v->d.m_info_idx_to_info_ptr = (bcf_info_t**)realloc(v->d.m_info_idx_to_info_ptr, new_value*sizeof(bcf_info_t*));
+        memset(v->d.m_info_idx_to_info_ptr+old_value, 0, (new_value-old_value)*sizeof(bcf_info_t*));
 #else
         if(v->d.m_info < new_value)
         {
-            int old_value = v->d.m_info;
+            old_value = v->d.m_info;
             hts_expand(bcf_info_t, new_value, v->d.m_info, v->d.info);
             //Set expanded values to invalid
             int i = 0;
             for(i=old_value;i<new_value;++i)
+            {
                 v->d.info[i].vptr = 0;
+                v->d.info[i].vptr_free = 0;
+            }
         }
 #endif
     }
@@ -2390,26 +2395,28 @@ int bcf_hdr_combine(bcf_hdr_t *dst, const bcf_hdr_t *src)
     return ret;
 }
 
-void permute_array_by_key(int8_t* ptr, size_t key_offset, size_t element_size, int num_elements)
+void permute_array_by_key(int8_t* ptr, size_t key_offset, size_t vptr_offset, size_t element_size, int num_elements)
 {
 #define GET_ELEMENT(ptr, i)  ((ptr)+(i)*element_size)
 #define GET_KEY(ptr, i) (*((int*)(GET_ELEMENT((ptr),(i)) + key_offset)))
+#define GET_VPTR(ptr, i) (*((int**)(GET_ELEMENT((ptr),(i)) + vptr_offset)))
     int i = 0;
     int8_t* tmp_buffer = (int8_t*)malloc(element_size);
     for(i=0;i<num_elements;++i)
     {
         int key = GET_KEY(ptr, i);
-        if(key == i || key < 0 || key >= num_elements)  //correct position
+        if(key == i || GET_VPTR(ptr, i) == 0)  //correct position or empty position
             continue;
         int8_t* src_ptr = GET_ELEMENT(ptr, i);
         do
         {
-            memcpy(tmp_buffer, GET_ELEMENT(ptr, key), element_size);
-            memcpy(GET_ELEMENT(ptr, key), src_ptr, element_size);
+            int8_t* dst_ptr = GET_ELEMENT(ptr, key);
+            memcpy(tmp_buffer, dst_ptr, element_size);
+            memcpy(dst_ptr, src_ptr, element_size);
             src_ptr = tmp_buffer;
             key = GET_KEY(tmp_buffer, 0);
-        } while(key != i && key >= 0 && key < num_elements);
-        if(key == i)    //final copy
+        } while(key != i && GET_VPTR(tmp_buffer, 0) != 0);
+        if(key == i && GET_VPTR(tmp_buffer, 0))    //final copy if valid
             memcpy(GET_ELEMENT(ptr, i), src_ptr, element_size);
     }
     free(tmp_buffer);
@@ -2421,17 +2428,7 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
 {
     int i;
 #ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
-    ASSERT(line->d.m_num_indexes > 0);
-    if(line->d.m_num_indexes < dst_hdr->n[BCF_DT_ID])
-    {
-        line->d.m_num_indexes = dst_hdr->n[BCF_DT_ID];
-#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
-        line->d.m_info_idx_to_info_ptr = (bcf_info_t**)realloc(line->d.m_info_idx_to_info_ptr, line->d.m_num_indexes*sizeof(bcf_info_t*));
-#else
-        line->d.info = (bcf_info_t*)realloc(line->d.info, line->d.m_num_indexes*sizeof(bcf_info_t));
-        line->d.m_info = line->d.m_num_indexes;
-#endif  //ifdef USE_SEPARATE_INFO_POINTER_ARRAY
-    }
+    set_num_fields_in_decode(dst_hdr, line);
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
     memset(line->d.m_info_idx_to_info_ptr, 0, line->d.m_num_indexes*sizeof(bcf_info_t*)); 
 #endif
@@ -2450,6 +2447,8 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
             src_hdr->transl[dict] = (int*) malloc(src_hdr->n[dict]*sizeof(int));
             for (i=0; i<src_hdr->n[dict]; i++)
             {
+                //FIXME: translate uses -1 to indicate that idx for the field has not changed
+                //However, bcf_hdr_id2int - returns -1 if id not found
                 if ( i>=dst_hdr->n[dict] || strcmp(src_hdr->id[dict][i].key,dst_hdr->id[dict][i].key) )
                 {
                     src_hdr->transl[dict][i] = bcf_hdr_id2int(dst_hdr,dict,src_hdr->id[dict][i].key);
@@ -2473,6 +2472,7 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
     if ( src_hdr->transl[BCF_DT_CTG][line->rid] >=0 ) line->rid = src_hdr->transl[BCF_DT_CTG][line->rid];
 
     // FILTER
+    // FIXME: how to deal with invalid filters in dst_hdr?
     for (i=0; i<line->d.n_flt; i++)
     {
         int src_id = line->d.flt[i];
@@ -2480,16 +2480,25 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
             line->d.flt[i] = src_hdr->transl[BCF_DT_ID][src_id];
         line->d.shared_dirty |= BCF1_DIRTY_FLT;
     }
-
     // INFO
-    for (i=0; i<line->n_info; i++)
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+    int limit = line->d.m_info;
+#else
+    int limit = line->n_info;
+#endif
+    for (i=0; i<limit; i++)
     {
+        if(line->d.info[i].vptr == 0)   //invalid/empty record
+            continue;
         int src_id = line->d.info[i].key;
         int dst_id = src_hdr->transl[BCF_DT_ID][src_id];
         if ( dst_id<0 )
         {
 #if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+            if(line->d.info[i].vptr_free)
+                free(line->d.info[i].vptr - line->d.info[i].vptr_off);
             line->d.info[i].vptr = 0;
+            line->d.info[i].vptr_free = 0;
 #endif
             continue;
         }
@@ -2523,7 +2532,7 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
 #endif
     }
 #if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
-    permute_array_by_key((int8_t*)(line->d.info), offsetof(bcf_info_t, key), sizeof(bcf_info_t), line->d.m_info);
+    permute_array_by_key((int8_t*)(line->d.info), offsetof(bcf_info_t, key), offsetof(bcf_info_t, vptr), sizeof(bcf_info_t), line->d.m_info);
 #endif
 
     // FORMAT
