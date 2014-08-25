@@ -80,7 +80,7 @@ void speed_check(char** argv)
         gettimeofday(&t2, 0);
         total_time += ((t2.tv_sec-t1.tv_sec)*1000000+(t2.tv_usec-t1.tv_usec));
     }
-    printf("Num info fields %llu num lines %d time %lf\n",sum_num_info, num_lines, ((double)total_time)*1e-6);
+    printf("Num info fields %lu num lines %d time %lf\n",sum_num_info, num_lines, ((double)total_time)*1e-6);
     for(i=0;i<SIZE;++i)
         bcf_destroy(array[i]);
     bcf_hdr_destroy(hdr);
@@ -98,11 +98,11 @@ void functional_check(char** argv)
     bcf1_t* line = 0;
 
     int status = 0;
-#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
-    line = bcf_initialize_for_direct_access(hdr);
-#else
+    /*#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS*/
+    /*line = bcf_initialize_for_direct_access(hdr);*/
+    /*#else*/
     line = bcf_init();
-#endif
+    /*#endif*/
     int i = 0;
     int info_ids[50];
     int num_info_fields = 0;
@@ -160,11 +160,96 @@ void functional_check(char** argv)
     bcf_hdr_destroy(hdr);
     hts_close(fptr);
 }
+
+void translate_check(char** argv)
+{
+    //open file and read record
+    htsFile* fptr = hts_open(argv[1], "r");
+    assert(fptr);
+    bcf_hdr_t* hdr = bcf_hdr_read(fptr);
+    assert(hdr);
+    //duplicate
+    bcf_hdr_t* dup_hdr = bcf_hdr_dup(hdr);
+    assert(dup_hdr);
+
+    /*int i = 0;*/
+    bcf1_t* line = 0;
+
+    int status = 0;
+    /*#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS*/
+    /*line = bcf_initialize_for_direct_access(hdr);*/
+    /*#else*/
+    line = bcf_init();
+    /*#endif*/
+    int i = 0;
+    int info_ids[50];
+    int num_info_fields = 0;
+    for(i=0;i<hdr->n[BCF_DT_ID];++i)
+        if(bcf_hdr_idinfo_exists(hdr, BCF_HL_INFO, i))
+            info_ids[num_info_fields++] = i;
+#define ERASE_SIZE 1
+#define ADD_SIZE 1
+    int erase_ids[ERASE_SIZE];
+    for(i=0;i<ERASE_SIZE;++i)
+    {
+        erase_ids[i] = info_ids[rand()%num_info_fields];
+        fprintf(stderr,"Removing: %s\n",bcf_hdr_int2id(hdr, BCF_DT_ID, erase_ids[i]));
+    }
+    int add_ids[ADD_SIZE];
+    for(i=0;i<ADD_SIZE;++i)
+    {
+        add_ids[i] = info_ids[rand()%num_info_fields];
+        fprintf(stderr,"Re-adding: %s\n",bcf_hdr_int2id(hdr, BCF_DT_ID, add_ids[i]));
+    }
+    for(i=0;i<ERASE_SIZE;++i)
+    {
+        bcf_hdr_remove(dup_hdr, BCF_HL_INFO, bcf_hdr_int2id(hdr, BCF_DT_ID, erase_ids[i]));
+        /*bcf_hrec_t* del_hrec = bcf_hdr_get_hrec(dup_hdr, BCF_HL_INFO, "ID", bcf_hdr_int2id(hdr, BCF_DT_ID, erase_ids[i]), 0);*/
+        /*assert(del_hrec);*/
+    }
+    for(i=0;i<ADD_SIZE;++i)
+    {
+        bcf_hrec_t* del_hrec = bcf_hdr_get_hrec(dup_hdr, BCF_HL_INFO, "ID", bcf_hdr_int2id(hdr, BCF_DT_ID, add_ids[i]), 0);
+        assert(del_hrec);
+        bcf_hrec_t* readd = bcf_hrec_dup(del_hrec);
+        bcf_hdr_remove(dup_hdr, BCF_HL_INFO, bcf_hdr_int2id(hdr, BCF_DT_ID, add_ids[i]));
+        bcf_hdr_add_hrec(dup_hdr, readd);
+    }
+
+    int hdr_length = 0;
+    printf("%s",bcf_hdr_fmt_text(dup_hdr, 0, &hdr_length));
+
+    unsigned long long sum_interval_length = 0;
+    unsigned num_lines = 0;
+    kstring_t debug_string = { 0, 0, 0 };
+    while(1)
+    {
+        status = bcf_read(fptr, hdr, line);
+        if(status < 0)
+            break;
+        bcf_unpack(line, BCF_UN_INFO);
+        bcf_translate(dup_hdr, hdr, line);
+
+        debug_string.l = 0;
+        vcf_format(dup_hdr, line, &debug_string);
+        printf("%s",debug_string.s);
+        ++num_lines;
+    }
+    fprintf(stderr,"Average interval length %llu\n",sum_interval_length/num_lines);
+
+    if(debug_string.m > 0)
+        free(debug_string.s);
+    bcf_destroy(line);
+    bcf_hdr_destroy(hdr);
+    hts_close(fptr);
+}
+
 int main(int argc, char** argv)
 {
   assert(argc >= 2 && "Requires 1 argument <vcf/bcf> file name");
   /*speed_check(argv);*/
-  functional_check(argv);
+  /*functional_check(argv);*/
+  translate_check(argv);
   return 0;
 }
 
