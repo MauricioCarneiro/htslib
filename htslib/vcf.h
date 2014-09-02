@@ -161,6 +161,14 @@ typedef struct {
 #define BCF1_DIRTY_FLT 4
 #define BCF1_DIRTY_INF 8
 
+#define ENABLE_DIRECT_ACCESS_TO_FIELDS 1
+/*#define USE_SEPARATE_INFO_POINTER_ARRAY 1*/
+
+//if USE_SEPARATE_INFO_POINTER_ARRAY is enabled, ENABLE_DIRECT_ACCESS_TO_FIELDS must be enabled also
+#if defined(USE_SEPARATE_INFO_POINTER_ARRAY) && !defined(ENABLE_DIRECT_ACCESS_TO_FIELDS)
+#define ENABLE_DIRECT_ACCESS_TO_FIELDS 1
+#endif
+
 typedef struct {
     int m_fmt, m_info, m_id, m_als, m_allele, m_flt; // allocated size (high-water mark); do not change
     int n_flt;  // Number of FILTER fields
@@ -169,6 +177,12 @@ typedef struct {
     char **allele;      // allele[0] is the REF (allele[] pointers to the als block); all null terminated
     bcf_info_t *info;   // INFO
     bcf_fmt_t *fmt;     // FORMAT and individual sample
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    int m_num_indexes;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+    bcf_info_t** m_info_idx_to_info_ptr;    //direct access from idx to pointers into info array
+#endif
+#endif
     variant_t *var;     // $var and $var_type set only when set_variant_types called
     int n_var, var_type;
     int shared_dirty;   // if set, shared.s must be recreated on BCF output
@@ -251,6 +265,13 @@ extern "C" {
 
     /** Initialize a bcf1_t object; equivalent to calloc(1, sizeof(bcf1_t)) */
     bcf1_t *bcf_init(void);
+
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    /** Initialize a bcf1_t object; equivalent to calloc(1, sizeof(bcf1_t)) */
+    /** Since the direct access fields requires the number of elements in the BCF_DT_ID, pass pointer to hdr 
+     * for initialization */
+    bcf1_t *bcf_initialize_for_direct_access(bcf_hdr_t* hdr);
+#endif
 
     /** Deallocate a bcf1_t object */
     void bcf_destroy(bcf1_t *v);
@@ -589,6 +610,17 @@ extern "C" {
      */
     bcf_fmt_t *bcf_get_fmt(const bcf_hdr_t *hdr, bcf1_t *line, const char *key);
     bcf_info_t *bcf_get_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key);
+
+    /**
+     * bcf_get_*_idx() - returns pointer to FORMAT/INFO field data given the header index instead of the string ID
+     * @line: VCF line obtained from vcf_parse1
+     * @idx:  The header index for the tag, obtained from bcf_hdr_id2int()
+     * 
+     * Returns bcf_fmt_t* / bcf_info_t*. These functions do not check if the index is valid 
+     * as their goal is to avoid the header lookup.
+     */
+    bcf_fmt_t *bcf_get_fmt_idx(bcf1_t *line, const int idx);
+    bcf_info_t *bcf_get_info_idx(bcf1_t *line, const int idx);
 
     /**
      *  bcf_get_info_*() - get INFO values, integers or floats

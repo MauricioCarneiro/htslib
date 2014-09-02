@@ -49,6 +49,12 @@ KSTREAM_DECLARE(gzFile, gzread)
     uint8_t bcf_type_shift[] = { 0, 0, 1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 static bcf_idinfo_t bcf_idinfo_def = { .info = { 15, 15, 15 }, .hrec = { NULL, NULL, NULL}, .id = -1 };
 
+#ifdef DEBUG
+#define ASSERT(x) assert(x);
+#else
+#define ASSERT(x)  ;
+#endif
+
 /*************************
  *** VCF header parser ***
  *************************/
@@ -134,6 +140,8 @@ int bcf_hdr_sync(bcf_hdr_t *h)
                 h->id[i][k].val = NULL;
             }
             h->n[i] = max_id+1;
+            //FIXME: how to resize m_info_idx_to_info_ptr to use larger number of elements
+            //for existing bcf1_t objects
         }
         for (k=kh_begin(d); k<kh_end(d); k++)
         {
@@ -794,6 +802,15 @@ bcf1_t *bcf_init1()
     return v;
 }
 
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+bcf1_t *bcf_initialize_for_direct_access(bcf_hdr_t* hdr)
+{
+    bcf1_t *v = bcf_init();
+    v->d.m_num_indexes = hdr->n[BCF_DT_ID];
+    return v;
+}
+#endif
+
 void bcf_clear(bcf1_t *v)
 {
     int i;
@@ -804,7 +821,12 @@ void bcf_clear(bcf1_t *v)
             free(v->d.info[i].vptr - v->d.info[i].vptr_off);
             v->d.info[i].vptr_free = 0;
         }
+        v->d.info[i].vptr = 0;
     }
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+    if(v->d.m_info_idx_to_info_ptr)
+        memset(v->d.m_info_idx_to_info_ptr, 0, v->d.m_num_indexes*sizeof(bcf_info_t*)); 
+#endif
     for (i=0; i<v->d.m_fmt; i++)
     {
         if ( v->d.fmt[i].p_free )
@@ -832,6 +854,16 @@ void bcf_empty1(bcf1_t *v)
     free(v->d.id);
     free(v->d.als);
     free(v->d.allele); free(v->d.flt); free(v->d.info); free(v->d.fmt);
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    v->d.m_num_indexes = 0;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+    if(v->d.m_info_idx_to_info_ptr)
+    {
+        free(v->d.m_info_idx_to_info_ptr);
+        v->d.m_info_idx_to_info_ptr = 0;
+    }
+#endif
+#endif
     if (v->d.var ) free(v->d.var);
     free(v->shared.s); free(v->indiv.s);
 }
@@ -841,6 +873,35 @@ void bcf_destroy1(bcf1_t *v)
     bcf_empty1(v);
     free(v);
 }
+
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+void set_num_fields_in_decode(const bcf_hdr_t* hdr, bcf1_t* v)
+{
+    int new_value = hdr->n[BCF_DT_ID];
+    int old_value = v->d.m_num_indexes;
+    if(old_value < new_value)
+    {
+        v->d.m_num_indexes = new_value;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+        v->d.m_info_idx_to_info_ptr = (bcf_info_t**)realloc(v->d.m_info_idx_to_info_ptr, new_value*sizeof(bcf_info_t*));
+        memset(v->d.m_info_idx_to_info_ptr+old_value, 0, (new_value-old_value)*sizeof(bcf_info_t*));
+#else
+        if(v->d.m_info < new_value)
+        {
+            old_value = v->d.m_info;
+            hts_expand(bcf_info_t, new_value, v->d.m_info, v->d.info);
+            //Set expanded values to invalid
+            int i = 0;
+            for(i=old_value;i<new_value;++i)
+            {
+                v->d.info[i].vptr = 0;
+                v->d.info[i].vptr_free = 0;
+            }
+        }
+#endif
+    }
+}
+#endif
 
 static inline int bcf_read1_core(BGZF *fp, bcf1_t *v)
 {
@@ -917,6 +978,9 @@ int bcf_subset_format(const bcf_hdr_t *hdr, bcf1_t *rec)
 int bcf_read(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
 {
     if (!fp->is_bin) return vcf_read(fp,h,v);
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     int ret = bcf_read1_core(fp->fp.bgzf, v);
     if ( ret!=0 || !h->keep_samples ) return ret;
     return bcf_subset_format(h,v);
@@ -956,7 +1020,13 @@ static inline void bcf1_sync_info(bcf1_t *line, kstring_t *str)
 {
     // pairs of typed vectors
     int i, irm = -1;
-    for (i=0; i<line->n_info; i++)
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+    int limit = line->d.m_info;
+    int num_valid_info = 0;
+#else
+    int limit = line->n_info;
+#endif
+    for (i=0; i<limit; i++)
     {
         bcf_info_t *info = &line->d.info[i];
         if ( !info->vptr )
@@ -966,13 +1036,29 @@ static inline void bcf1_sync_info(bcf1_t *line, kstring_t *str)
             continue;
         }
         kputsn_(info->vptr - info->vptr_off, info->vptr_len + info->vptr_off, str);
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+        ++num_valid_info;
+#else
         if ( irm >=0 )
         {
             bcf_info_t tmp = line->d.info[irm]; line->d.info[irm] = line->d.info[i]; line->d.info[i] = tmp;
             while ( irm<=i && line->d.info[irm].vptr ) irm++;
         }
+#endif
     }
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+    line->n_info = num_valid_info;
+#else
     if ( irm>=0 ) line->n_info = irm;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+    memset(line->d.m_info_idx_to_info_ptr, 0, line->d.m_num_indexes*sizeof(bcf_info_t*));
+    for(i=0;i<line->n_info;++i)
+    {
+        ASSERT(line->d.info[i].vptr);
+        line->d.m_info_idx_to_info_ptr[line->d.info[i].key] = &(line->d.info[i]);
+    }
+#endif  //USE_SEPARATE_INFO_POINTER_ARRAY
+#endif  //defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
 }
 
 static int bcf1_sync(bcf1_t *line)
@@ -1058,8 +1144,18 @@ static int bcf1_sync(bcf1_t *line)
         // Reallocated line->shared.s block invalidated line->d.info[].vptr pointers
         size_t off_new = line->unpack_size[0] + line->unpack_size[1] + line->unpack_size[2];
         int i;
-        for (i=0; i<line->n_info; i++)
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+        int limit = line->d.m_info;
+#else
+        int limit = line->n_info;
+#endif
+        for (i=0; i<limit; i++)
         {
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+            //For direct access, null entries still exist
+            if(line->d.info[i].vptr == 0)
+                continue;
+#endif
             uint8_t *vptr_free = line->d.info[i].vptr_free ? line->d.info[i].vptr - line->d.info[i].vptr_off : NULL;
             line->d.info[i].vptr = (uint8_t*) line->shared.s + off_new + line->d.info[i].vptr_off;
             off_new += line->d.info[i].vptr_len + line->d.info[i].vptr_off;
@@ -1160,6 +1256,9 @@ int bcf_write(htsFile *hfp, const bcf_hdr_t *h, bcf1_t *v)
         fprintf(stderr,"[%s:%d %s] Unchecked error (%d), exiting.\n", __FILE__,__LINE__,__FUNCTION__,v->errcode);
         exit(1);
     }
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     bcf1_sync(v);   // check if the BCF record was modified
 
     BGZF *fp = hfp->fp.bgzf;
@@ -1881,6 +1980,9 @@ int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
 int vcf_read(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
 {
     int ret;
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     ret = hts_getline(fp, KS_SEP_LINE, &fp->line);
     if (ret < 0) return -1;
     return vcf_parse1(&fp->line, h, v);
@@ -1972,10 +2074,39 @@ int bcf_unpack(bcf1_t *b, int which)
     }
     if ((which&BCF_UN_INFO) && !(b->unpacked&BCF_UN_INFO)) { // INFO
         ptr = (uint8_t*)b->shared.s + b->unpack_size[0] + b->unpack_size[1] + b->unpack_size[2];
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+        ASSERT(d->m_num_indexes > 0);
+        hts_expand(bcf_info_t, d->m_num_indexes, d->m_info, d->info);
+#else
         hts_expand(bcf_info_t, b->n_info, d->m_info, d->info);
-        for (i = 0; i < d->m_info; ++i) d->info[i].vptr_free = 0;
+#endif
+        for (i = 0; i < d->m_info; ++i)
+        {
+            d->info[i].vptr = 0;
+            d->info[i].vptr_free = 0;
+        }
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+        ASSERT(d->m_num_indexes > 0);
+        if(d->m_info_idx_to_info_ptr == 0)
+            d->m_info_idx_to_info_ptr = (bcf_info_t**)calloc(d->m_num_indexes, sizeof(bcf_info_t*));
+        else
+            memset(d->m_info_idx_to_info_ptr, 0, d->m_num_indexes*sizeof(bcf_info_t*));
+#endif
         for (i = 0; i < b->n_info; ++i)
-            ptr = bcf_unpack_info_core1(ptr, &d->info[i]);
+        {
+            int insert_idx = i;
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+            uint8_t* tmp_ptr = ptr;
+            insert_idx = bcf_dec_typed_int1(tmp_ptr, &tmp_ptr); //extract key, which is the insert idx
+#endif
+            ASSERT(insert_idx < d->m_info);
+            ptr = bcf_unpack_info_core1(ptr, &(d->info[insert_idx]));
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+            int key = d->info[insert_idx].key;
+            ASSERT(key < d->m_num_indexes);
+            d->m_info_idx_to_info_ptr[key] = &(d->info[insert_idx]);
+#endif
+        }
         b->unpacked |= BCF_UN_INFO;
     }
     if ((which&BCF_UN_FMT) && b->n_sample && !(b->unpacked&BCF_UN_FMT)) { // FORMAT
@@ -2019,7 +2150,12 @@ int vcf_format(const bcf_hdr_t *h, const bcf1_t *v, kstring_t *s)
     kputc('\t', s); // INFO
     if (v->n_info) {
         int first = 1;
-        for (i = 0; i < v->n_info; ++i) {
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+        int limit = v->d.m_info;
+#else
+        int limit = v->n_info;
+#endif
+        for (i = 0; i < limit; ++i) {
             bcf_info_t *z = &v->d.info[i];
             if ( !z->vptr ) continue;
             if ( !first ) kputc(';', s); first = 0;
@@ -2100,6 +2236,9 @@ int vcf_write_line(htsFile *fp, kstring_t *line)
 int vcf_write(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v)
 {
     int ret;
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(h, v);
+#endif
     fp->line.l = 0;
     vcf_format1(h, v, &fp->line);
     if ( fp->is_compressed==1 )
@@ -2239,9 +2378,45 @@ int bcf_hdr_combine(bcf_hdr_t *dst, const bcf_hdr_t *src)
     if ( need_sync ) bcf_hdr_sync(dst);
     return ret;
 }
+
+void permute_array_by_key(int8_t* ptr, size_t key_offset, size_t vptr_offset, size_t element_size, int num_elements)
+{
+#define GET_ELEMENT(ptr, i)  ((ptr)+(i)*element_size)
+#define GET_KEY(ptr, i) (*((int*)(GET_ELEMENT((ptr),(i)) + key_offset)))
+#define GET_VPTR(ptr, i) (*((int**)(GET_ELEMENT((ptr),(i)) + vptr_offset)))
+    int i = 0;
+    int8_t* tmp_buffer = (int8_t*)malloc(element_size);
+    for(i=0;i<num_elements;++i)
+    {
+        int key = GET_KEY(ptr, i);
+        if(key == i || GET_VPTR(ptr, i) == 0)  //correct position or empty position
+            continue;
+        int8_t* src_ptr = GET_ELEMENT(ptr, i);
+        do
+        {
+            int8_t* dst_ptr = GET_ELEMENT(ptr, key);
+            memcpy(tmp_buffer, dst_ptr, element_size);
+            memcpy(dst_ptr, src_ptr, element_size);
+            src_ptr = tmp_buffer;
+            key = GET_KEY(tmp_buffer, 0);
+        } while(key != i && GET_VPTR(tmp_buffer, 0) != 0);
+        if(key == i && GET_VPTR(tmp_buffer, 0))    //final copy if valid
+            memcpy(GET_ELEMENT(ptr, i), src_ptr, element_size);
+    }
+    free(tmp_buffer);
+#undef GET_ELEMENT
+#undef GET_KEY
+}
+
 int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
 {
     int i;
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(dst_hdr, line);
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+    memset(line->d.m_info_idx_to_info_ptr, 0, line->d.m_num_indexes*sizeof(bcf_info_t*)); 
+#endif
+#endif  //ENABLE_DIRECT_ACCESS_TO_FIELDS
     if ( line->errcode )
     {
         fprintf(stderr,"[%s:%d %s] Unchecked error (%d), exiting.\n", __FILE__,__LINE__,__FUNCTION__,line->errcode);
@@ -2256,6 +2431,8 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
             src_hdr->transl[dict] = (int*) malloc(src_hdr->n[dict]*sizeof(int));
             for (i=0; i<src_hdr->n[dict]; i++)
             {
+                //FIXME: translate uses -1 to indicate that idx for the field has not changed
+                //However, bcf_hdr_id2int - returns -1 if id not found
                 if ( i>=dst_hdr->n[dict] || strcmp(src_hdr->id[dict][i].key,dst_hdr->id[dict][i].key) )
                 {
                     src_hdr->transl[dict][i] = bcf_hdr_id2int(dst_hdr,dict,src_hdr->id[dict][i].key);
@@ -2279,6 +2456,7 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
     if ( src_hdr->transl[BCF_DT_CTG][line->rid] >=0 ) line->rid = src_hdr->transl[BCF_DT_CTG][line->rid];
 
     // FILTER
+    // FIXME: how to deal with invalid filters in dst_hdr?
     for (i=0; i<line->d.n_flt; i++)
     {
         int src_id = line->d.flt[i];
@@ -2286,13 +2464,28 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
             line->d.flt[i] = src_hdr->transl[BCF_DT_ID][src_id];
         line->d.shared_dirty |= BCF1_DIRTY_FLT;
     }
-
     // INFO
-    for (i=0; i<line->n_info; i++)
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+    int limit = line->d.m_info;
+#else
+    int limit = line->n_info;
+#endif
+    for (i=0; i<limit; i++)
     {
+        if(line->d.info[i].vptr == 0)   //invalid/empty record
+            continue;
         int src_id = line->d.info[i].key;
         int dst_id = src_hdr->transl[BCF_DT_ID][src_id];
-        if ( dst_id<0 ) continue;
+        if ( dst_id<0 )
+        {
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+            if(line->d.info[i].vptr_free)
+                free(line->d.info[i].vptr - line->d.info[i].vptr_off);
+            line->d.info[i].vptr = 0;
+            line->d.info[i].vptr_free = 0;
+#endif
+            continue;
+        }
         int src_size = src_id>>7 ? ( src_id>>15 ? BCF_BT_INT32 : BCF_BT_INT16) : BCF_BT_INT8;
         int dst_size = dst_id>>7 ? ( dst_id>>15 ? BCF_BT_INT32 : BCF_BT_INT16) : BCF_BT_INT8;
         if ( src_size==dst_size )   // can overwrite
@@ -2317,7 +2510,14 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
             info->key = dst_id;
             line->d.shared_dirty |= BCF1_DIRTY_INF;
         }
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+        ASSERT(dst_id < line->d.m_num_indexes);
+        line->d.m_info_idx_to_info_ptr[dst_id] = &(line->d.info[i]);
+#endif
     }
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+    permute_array_by_key((int8_t*)(line->d.info), offsetof(bcf_info_t, key), offsetof(bcf_info_t, vptr), sizeof(bcf_info_t), line->d.m_info);
+#endif
 
     // FORMAT
     for (i=0; i<line->n_fmt; i++)
@@ -2600,14 +2800,15 @@ int bcf_get_variant_type(bcf1_t *rec, int ith_allele)
 
 int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type)
 {
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    set_num_fields_in_decode(hdr, line);
+#endif
     // Is the field already present?
-    int i, inf_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
+    int inf_id = bcf_hdr_id2int(hdr,BCF_DT_ID,key);
     if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,inf_id) ) return -1;    // No such INFO field in the header
     if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
 
-    for (i=0; i<line->n_info; i++)
-        if ( inf_id==line->d.info[i].key ) break;
-    bcf_info_t *inf = i==line->n_info ? NULL : &line->d.info[i];
+    bcf_info_t* inf = bcf_get_info_idx(line, inf_id);
 
     if ( !n || (type==BCF_HT_STR && !values) )
     {
@@ -2621,6 +2822,10 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
             }
             line->d.shared_dirty |= BCF1_DIRTY_INF;
             inf->vptr = NULL;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+            ASSERT(inf_id < line->d.m_num_indexes);
+            line->d.m_info_idx_to_info_ptr[inf_id] = 0;
+#endif
         }
         return 0;
     }
@@ -2671,11 +2876,21 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
     {
         // The tag is not present, create new one
         line->n_info++;
+        int insert_idx = line->n_info-1;
+#if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
+        insert_idx = inf_id;
+        ASSERT(insert_idx < line->d.m_info);
+#else
         hts_expand0(bcf_info_t, line->n_info, line->d.m_info , line->d.info);
-        inf = &line->d.info[line->n_info-1];
+#endif
+        inf = &line->d.info[insert_idx];
         bcf_unpack_info_core1((uint8_t*)str.s, inf);
         inf->vptr_free = 1;
         line->d.shared_dirty |= BCF1_DIRTY_INF;
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+        ASSERT(inf_id < line->d.m_num_indexes);
+        line->d.m_info_idx_to_info_ptr[inf_id] = inf;
+#endif
     }
     line->unpacked |= BCF_UN_INFO;
     return 0;
@@ -2947,42 +3162,63 @@ int bcf_update_id(const bcf_hdr_t *hdr, bcf1_t *line, const char *id)
 
 bcf_fmt_t *bcf_get_fmt(const bcf_hdr_t *hdr, bcf1_t *line, const char *key)
 {
-    int i, id = bcf_hdr_id2int(hdr, BCF_DT_ID, key);
+    int id = bcf_hdr_id2int(hdr, BCF_DT_ID, key);
     if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_FMT,id) ) return NULL;   // no such FMT field in the header
-    if ( !(line->unpacked & BCF_UN_FMT) ) bcf_unpack(line, BCF_UN_FMT);
-    for (i=0; i<line->n_fmt; i++)
-    {
-        if ( line->d.fmt[i].id==id ) return &line->d.fmt[i];
-    }
-    return NULL;
+    return bcf_get_fmt_idx(line, id);
 }
 
 bcf_info_t *bcf_get_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key)
 {
-    int i, id = bcf_hdr_id2int(hdr, BCF_DT_ID, key);
+    int id = bcf_hdr_id2int(hdr, BCF_DT_ID, key);
     if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,id) ) return NULL;   // no such INFO field in the header
-    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
-    for (i=0; i<line->n_info; i++)
+    return bcf_get_info_idx(line, id);
+}
+
+bcf_fmt_t *bcf_get_fmt_idx(bcf1_t *line, const int idx) 
+{
+    int i;
+    if ( !(line->unpacked & BCF_UN_FMT) ) bcf_unpack(line, BCF_UN_FMT);
+    for (i=0; i<line->n_fmt; i++)
     {
-        if ( line->d.info[i].key==id ) return &line->d.info[i];
+        if ( line->d.fmt[i].id==idx ) return &line->d.fmt[i];
     }
     return NULL;
 }
 
+bcf_info_t *bcf_get_info_idx(bcf1_t *line, const int idx) 
+{
+    if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
+#ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    ASSERT(idx < line->d.m_num_indexes);
+#ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+    return line->d.m_info_idx_to_info_ptr[idx];
+#else
+    return (line->d.info[idx].vptr == 0) ? 0 : &(line->d.info[idx]);
+#endif  //ifdef USE_SEPARATE_INFO_POINTER_ARRAY
+#else   //ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+    int i;
+    for (i=0; i<line->n_info; i++)
+    {
+        if ( line->d.info[i].key==idx ) return &line->d.info[i];
+    }
+    return NULL;
+#endif  //ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
+}
+
+
 int bcf_get_info_values(const bcf_hdr_t *hdr, bcf1_t *line, const char *tag, void **dst, int *ndst, int type)
 {
-    int i,j, tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, tag);
+    int j, tag_id = bcf_hdr_id2int(hdr, BCF_DT_ID, tag);
     if ( !bcf_hdr_idinfo_exists(hdr,BCF_HL_INFO,tag_id) ) return -1;    // no such INFO field in the header
     if ( bcf_hdr_id2type(hdr,BCF_HL_INFO,tag_id)!=type ) return -2;     // expected different type
 
     if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
 
-    for (i=0; i<line->n_info; i++)
-        if ( line->d.info[i].key==tag_id ) break;
-    if ( i==line->n_info ) return ( type==BCF_HT_FLAG ) ? 0 : -3;       // the tag is not present in this record
-    if ( type==BCF_HT_FLAG ) return 1;
+    bcf_info_t* info = bcf_get_info_idx(line, tag_id);
+    if(info == 0)
+        return ( type==BCF_HT_FLAG ) ? 0 : -3;          // the tag is not present in this record
+    if(type == BCF_HT_FLAG) return 1;
 
-    bcf_info_t *info = &line->d.info[i];
     if ( type==BCF_HT_STR )
     {
         if ( *ndst < info->len+1 )
