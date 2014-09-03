@@ -1823,47 +1823,56 @@ int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v)
                         k = kh_get(vdict, d, key);
                         v->errcode = BCF_ERR_TAG_UNDEF;
                     }
-                    uint32_t y = kh_val(d, k).info[BCF_HL_INFO];
-                    ++v->n_info;
-                    bcf_enc_int1(str, kh_val(d, k).id);
-                    if (val == 0) {
-                        bcf_enc_size(str, 0, BCF_BT_NULL);
-                    } else if ((y>>4&0xf) == BCF_HT_FLAG || (y>>4&0xf) == BCF_HT_STR) { // if Flag has a value, treat it as a string
-                        bcf_enc_vchar(str, end - val, val);
-                    } else { // int/float value/array
-                        int i, n_val;
-                        char *t, *te;
-                        for (t = val, n_val = 1; *t; ++t) // count the number of values
-                            if (*t == ',') ++n_val;
-                        if ((y>>4&0xf) == BCF_HT_INT) {
-                            int32_t *z;
-                            z = (int32_t*)alloca(n_val<<2);
-                            for (i = 0, t = val; i < n_val; ++i, ++t)
-                            {
-                                z[i] = strtol(t, &te, 10);
-                                if ( te==t ) // conversion failed
+                    if(strcmp(key, "END") == 0)
+                    {
+                        char* endptr = 0;
+                        int endvalue = strtol(val, &endptr, 10);
+                        if(endptr != val) //conversion succeeded
+                            v->rlen = endvalue - v->pos;
+                    }
+                    else
+                    {
+                        uint32_t y = kh_val(d, k).info[BCF_HL_INFO];
+                        ++v->n_info;
+                        bcf_enc_int1(str, kh_val(d, k).id);
+                        if (val == 0) {
+                            bcf_enc_size(str, 0, BCF_BT_NULL);
+                        } else if ((y>>4&0xf) == BCF_HT_FLAG || (y>>4&0xf) == BCF_HT_STR) { // if Flag has a value, treat it as a string
+                            bcf_enc_vchar(str, end - val, val);
+                        } else { // int/float value/array
+                            int i, n_val;
+                            char *t, *te;
+                            for (t = val, n_val = 1; *t; ++t) // count the number of values
+                                if (*t == ',') ++n_val;
+                            if ((y>>4&0xf) == BCF_HT_INT) {
+                                int32_t *z;
+                                z = (int32_t*)alloca(n_val<<2);
+                                for (i = 0, t = val; i < n_val; ++i, ++t)
                                 {
-                                    z[i] = bcf_int32_missing;
-                                    while ( *te && *te!=',' ) te++;
+                                    z[i] = strtol(t, &te, 10);
+                                    if ( te==t ) // conversion failed
+                                    {
+                                        z[i] = bcf_int32_missing;
+                                        while ( *te && *te!=',' ) te++;
+                                    }
+                                    t = te;
                                 }
-                                t = te;
-                            }
-                            bcf_enc_vint(str, n_val, z, -1);
-                            if (strcmp(key, "END") == 0) v->rlen = z[0] - v->pos;
-                        } else if ((y>>4&0xf) == BCF_HT_REAL) {
-                            float *z;
-                            z = (float*)alloca(n_val<<2);
-                            for (i = 0, t = val; i < n_val; ++i, ++t)
-                            {
-                                z[i] = strtod(t, &te);
-                                if ( te==t ) // conversion failed
+                                bcf_enc_vint(str, n_val, z, -1);
+                            } else if ((y>>4&0xf) == BCF_HT_REAL) {
+                                float *z;
+                                z = (float*)alloca(n_val<<2);
+                                for (i = 0, t = val; i < n_val; ++i, ++t)
                                 {
-                                    bcf_float_set_missing(z[i]);
-                                    while ( *te && *te!=',' ) te++;
+                                    z[i] = strtod(t, &te);
+                                    if ( te==t ) // conversion failed
+                                    {
+                                        bcf_float_set_missing(z[i]);
+                                        while ( *te && *te!=',' ) te++;
+                                    }
+                                    t = te;
                                 }
-                                t = te;
+                                bcf_enc_vfloat(str, n_val, z);
                             }
-                            bcf_enc_vfloat(str, n_val, z);
                         }
                     }
                     if (c == 0) break;
@@ -1993,6 +2002,13 @@ int vcf_format(const bcf_hdr_t *h, const bcf1_t *v, kstring_t *s)
 {
     int i;
     bcf_unpack((bcf1_t*)v, BCF_UN_ALL);
+    //Add END INFO field if rlen != strlen(reference)
+    //FIXME: what happens when rlen == strlen(reference)? under what conditions should END be added
+    if(v->rlen != strlen(v->d.allele[0]))
+    {
+        int end_value = v->pos + v->rlen;
+        bcf_update_info_int32(h, (bcf1_t*)v, "END", &end_value, 1);
+    }
     kputs(h->id[BCF_DT_CTG][v->rid].key, s); // CHROM
     kputc('\t', s); kputw(v->pos + 1, s); // POS
     kputc('\t', s); kputs(v->d.id ? v->d.id : ".", s); // ID
