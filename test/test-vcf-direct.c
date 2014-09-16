@@ -69,12 +69,15 @@ void speed_check(char** argv)
             for(i=0;i<num;++i)
             {
                 if(array[i]->n_info > 1)
-                    /*for(k=0;k<1000;++k)*/
+                {
+                    int k;
+                    for(k=0;k<1000;++k)
                     {
                         for(j=0;j<num_info_fields;++j)
                             sum_num_info += (bcf_get_info_idx(array[i], info_ids[j])) ? 1 : 0;
                         ++num_lines;
                     }
+                }
             }
         }
         gettimeofday(&t2, 0);
@@ -247,9 +250,9 @@ void translate_check(char** argv)
 int main(int argc, char** argv)
 {
   assert(argc >= 2 && "Requires 1 argument <vcf/bcf> file name");
-  /*speed_check(argv);*/
+  speed_check(argv);
   /*functional_check(argv);*/
-  translate_check(argv);
+  /*translate_check(argv);*/
   return 0;
 }
 
