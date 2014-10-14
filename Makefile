@@ -60,7 +60,8 @@ BUILT_TEST_PROGRAMS = \
 	test/sam \
 	test/test_view \
 	test/test-vcf-api \
-	test/test-vcf-sweep
+	test/test-vcf-sweep \
+	test/test-vcf-direct
 
 all: lib-static lib-shared $(BUILT_PROGRAMS) $(BUILT_TEST_PROGRAMS)
 
@@ -261,12 +262,16 @@ test/test-vcf-api: test/test-vcf-api.o libhts.a
 test/test-vcf-sweep: test/test-vcf-sweep.o libhts.a
 	$(CC) -pthread $(LDFLAGS) -o $@ test/test-vcf-sweep.o libhts.a $(LDLIBS) -lz
 
+test/test-vcf-direct: test/test-vcf-direct.o libhts.a
+	$(CC) -pthread $(LDFLAGS) -o $@ test/test-vcf-direct.o libhts.a $(LDLIBS) -lz
+
 test/fieldarith.o: test/fieldarith.c $(htslib_sam_h)
 test/hfile.o: test/hfile.c $(htslib_hfile_h) $(htslib_hts_defs_h)
 test/sam.o: test/sam.c $(htslib_sam_h) htslib/kstring.h
 test/test_view.o: test/test_view.c $(cram_h) $(htslib_sam_h)
 test/test-vcf-api.o: test/test-vcf-api.c $(htslib_hts_h) $(htslib_vcf_h) htslib/kstring.h
 test/test-vcf-sweep.o: test/test-vcf-sweep.c $(htslib_vcf_sweep_h)
+test/test-vcf-direct.o: test/test-vcf-direct.c $(htslib_vcf_sweep_h)
 
 
 install: libhts.a $(BUILT_PROGRAMS) installdirs install-$(SHLIB_FLAVOUR) install-pkgconfig
