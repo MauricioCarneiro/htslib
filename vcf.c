@@ -49,12 +49,6 @@ KSTREAM_DECLARE(gzFile, gzread)
     uint8_t bcf_type_shift[] = { 0, 0, 1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 static bcf_idinfo_t bcf_idinfo_def = { .info = { 15, 15, 15 }, .hrec = { NULL, NULL, NULL}, .id = -1 };
 
-#ifdef DEBUG
-#define ASSERT(x) assert(x);
-#else
-#define ASSERT(x)  ;
-#endif
-
 /*************************
  *** VCF header parser ***
  *************************/
@@ -1054,7 +1048,6 @@ static inline void bcf1_sync_info(bcf1_t *line, kstring_t *str)
     memset(line->d.m_info_idx_to_info_ptr, 0, line->d.m_num_indexes*sizeof(bcf_info_t*));
     for(i=0;i<line->n_info;++i)
     {
-        ASSERT(line->d.info[i].vptr);
         line->d.m_info_idx_to_info_ptr[line->d.info[i].key] = &(line->d.info[i]);
     }
 #endif  //USE_SEPARATE_INFO_POINTER_ARRAY
@@ -2084,7 +2077,6 @@ int bcf_unpack(bcf1_t *b, int which)
     if ((which&BCF_UN_INFO) && !(b->unpacked&BCF_UN_INFO)) { // INFO
         ptr = (uint8_t*)b->shared.s + b->unpack_size[0] + b->unpack_size[1] + b->unpack_size[2];
 #if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
-        ASSERT(d->m_num_indexes > 0);
         hts_expand(bcf_info_t, d->m_num_indexes, d->m_info, d->info);
 #else
         hts_expand(bcf_info_t, b->n_info, d->m_info, d->info);
@@ -2095,7 +2087,6 @@ int bcf_unpack(bcf1_t *b, int which)
             d->info[i].vptr_free = 0;
         }
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
-        ASSERT(d->m_num_indexes > 0);
         if(d->m_info_idx_to_info_ptr == 0)
             d->m_info_idx_to_info_ptr = (bcf_info_t**)calloc(d->m_num_indexes, sizeof(bcf_info_t*));
         else
@@ -2108,11 +2099,9 @@ int bcf_unpack(bcf1_t *b, int which)
             uint8_t* tmp_ptr = ptr;
             insert_idx = bcf_dec_typed_int1(tmp_ptr, &tmp_ptr); //extract key, which is the insert idx
 #endif
-            ASSERT(insert_idx < d->m_info);
             ptr = bcf_unpack_info_core1(ptr, &(d->info[insert_idx]));
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
             int key = d->info[insert_idx].key;
-            ASSERT(key < d->m_num_indexes);
             d->m_info_idx_to_info_ptr[key] = &(d->info[insert_idx]);
 #endif
         }
@@ -2527,7 +2516,6 @@ int bcf_translate(const bcf_hdr_t *dst_hdr, bcf_hdr_t *src_hdr, bcf1_t *line)
             line->d.shared_dirty |= BCF1_DIRTY_INF;
         }
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
-        ASSERT(dst_id < line->d.m_num_indexes);
         line->d.m_info_idx_to_info_ptr[dst_id] = &(line->d.info[i]);
 #endif
     }
@@ -2839,7 +2827,6 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
             line->d.shared_dirty |= BCF1_DIRTY_INF;
             inf->vptr = NULL;
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
-            ASSERT(inf_id < line->d.m_num_indexes);
             line->d.m_info_idx_to_info_ptr[inf_id] = 0;
 #endif
         }
@@ -2895,7 +2882,6 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
         int insert_idx = line->n_info-1;
 #if defined(ENABLE_DIRECT_ACCESS_TO_FIELDS) && !defined(USE_SEPARATE_INFO_POINTER_ARRAY)
         insert_idx = inf_id;
-        ASSERT(insert_idx < line->d.m_info);
 #else
         hts_expand0(bcf_info_t, line->n_info, line->d.m_info , line->d.info);
 #endif
@@ -2904,7 +2890,6 @@ int bcf_update_info(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const v
         inf->vptr_free = 1;
         line->d.shared_dirty |= BCF1_DIRTY_INF;
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
-        ASSERT(inf_id < line->d.m_num_indexes);
         line->d.m_info_idx_to_info_ptr[inf_id] = inf;
 #endif
     }
@@ -3205,7 +3190,6 @@ bcf_info_t *bcf_get_info_idx(bcf1_t *line, const int idx)
 {
     if ( !(line->unpacked & BCF_UN_INFO) ) bcf_unpack(line, BCF_UN_INFO);
 #ifdef ENABLE_DIRECT_ACCESS_TO_FIELDS
-    ASSERT(idx < line->d.m_num_indexes);
 #ifdef USE_SEPARATE_INFO_POINTER_ARRAY
     return line->d.m_info_idx_to_info_ptr[idx];
 #else
